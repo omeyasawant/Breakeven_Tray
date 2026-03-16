@@ -10,6 +10,7 @@ import stat
 import subprocess
 import threading
 import time
+import traceback
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 from urllib.parse import urljoin
@@ -24,10 +25,47 @@ try:
 except Exception:
     pkg_version = None
 
-ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
-CONFIG_PATH = os.path.normpath(os.path.join(ROOT_DIR, "..", "client_config.json"))
-ICON_PATH = os.path.join(ROOT_DIR, "icon.png")
-LOG_DIR = os.path.join(ROOT_DIR, "logs")
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+BUNDLE_DIR = getattr(sys, "_MEIPASS", SCRIPT_DIR)
+RUNTIME_DIR = os.path.dirname(os.path.abspath(sys.executable)) if getattr(sys, "frozen", False) else SCRIPT_DIR
+
+
+def first_existing_path(paths: List[str]) -> Optional[str]:
+    seen = set()
+    for candidate in paths:
+        normalized = os.path.normpath(candidate)
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        if os.path.exists(normalized):
+            return normalized
+    return None
+
+
+def resolve_client_config_path() -> str:
+    search_roots = [RUNTIME_DIR, SCRIPT_DIR, os.getcwd()]
+    candidates: List[str] = []
+
+    for root in search_roots:
+        current = os.path.abspath(root)
+        for _ in range(6):
+            candidates.append(os.path.join(current, "client_config.json"))
+            parent = os.path.dirname(current)
+            if parent == current:
+                break
+            current = parent
+
+    fallback_path = os.path.join(RUNTIME_DIR, "..", "client_config.json")
+    return first_existing_path(candidates) or os.path.normpath(fallback_path)
+
+
+CONFIG_PATH = resolve_client_config_path()
+ICON_PATH = first_existing_path([
+    os.path.join(BUNDLE_DIR, "icon.png"),
+    os.path.join(SCRIPT_DIR, "icon.png"),
+    os.path.join(RUNTIME_DIR, "icon.png"),
+]) or os.path.join(BUNDLE_DIR, "icon.png")
+LOG_DIR = os.path.join(RUNTIME_DIR, "logs")
 LOG_PATH = os.path.join(LOG_DIR, "tray.log")
 
 UPDATES_INDEX_URL = "https://updates.breakeventx.com"
@@ -170,7 +208,9 @@ class BackendController:
         self._dashboard_handle: Optional[subprocess.Popen] = None
         self._state = TrayState()
         self._state_lock = threading.Lock()
-        log_info(f"Tray runtime base: {ROOT_DIR}")
+        log_info(f"Tray script dir: {SCRIPT_DIR}")
+        log_info(f"Tray bundle dir: {BUNDLE_DIR}")
+        log_info(f"Tray runtime dir: {RUNTIME_DIR}")
         log_info(f"Tray config path: {CONFIG_PATH}")
         log_info(f"Platform: {platform.platform()}")
 
@@ -963,7 +1003,7 @@ class TrayApp(QtWidgets.QSystemTrayIcon):
 
     def load_config(self):
         try:
-            with open(CONFIG_PATH, 'r', encoding='utf-8') as handle:
+            with open(resolve_client_config_path(), 'r', encoding='utf-8') as handle:
                 return json.load(handle)
         except Exception as exc:
             log_error(f"Error reading config: {exc}")
