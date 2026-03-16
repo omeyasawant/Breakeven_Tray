@@ -1,0 +1,4 @@
+psutil>=5.9
+requests>=2.31
+packaging>=23.2
+PyQt5>=5.15

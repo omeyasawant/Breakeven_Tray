@@ -1,0 +1,14 @@
+dist/
+tray_dist/
+build/
+__pycache__/
+*.spec
+*.log
+.venv/
+.env
+.github_token
+node_modules/
+package-lock.json
+build_tray.js
+package.json
+backuptrayapp/
