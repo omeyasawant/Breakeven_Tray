@@ -27,7 +27,24 @@ except Exception:
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 BUNDLE_DIR = getattr(sys, "_MEIPASS", SCRIPT_DIR)
-RUNTIME_DIR = os.path.dirname(os.path.abspath(sys.executable)) if getattr(sys, "frozen", False) else SCRIPT_DIR
+
+
+def resolve_launch_dir() -> str:
+    argv0 = sys.argv[0] if sys.argv else ""
+    if argv0:
+        candidate = os.path.dirname(os.path.abspath(argv0))
+        if os.path.isdir(candidate):
+            return candidate
+
+    if getattr(sys, "frozen", False):
+        candidate = os.path.dirname(os.path.abspath(sys.executable))
+        if os.path.isdir(candidate):
+            return candidate
+
+    return SCRIPT_DIR
+
+
+RUNTIME_DIR = resolve_launch_dir()
 
 
 def first_existing_path(paths: List[str]) -> Optional[str]:
@@ -208,16 +225,19 @@ class BackendController:
         self._dashboard_handle: Optional[subprocess.Popen] = None
         self._state = TrayState()
         self._state_lock = threading.Lock()
+        self._config_path = resolve_client_config_path()
         log_info(f"Tray script dir: {SCRIPT_DIR}")
         log_info(f"Tray bundle dir: {BUNDLE_DIR}")
         log_info(f"Tray runtime dir: {RUNTIME_DIR}")
-        log_info(f"Tray config path: {CONFIG_PATH}")
+        log_info(f"Tray launch argv[0]: {sys.argv[0] if sys.argv else ''}")
+        log_info(f"Tray config path: {self._config_path}")
         log_info(f"Platform: {platform.platform()}")
 
     def load_config(self) -> dict:
-        config = read_json(CONFIG_PATH)
+        self._config_path = resolve_client_config_path()
+        config = read_json(self._config_path)
         if not isinstance(config, dict):
-            raise RuntimeError(f"Unable to read client config at {CONFIG_PATH}")
+            raise RuntimeError(f"Unable to read client config at {self._config_path}")
         return config
 
     def service_manifest_paths(self, config: dict) -> List[str]:
