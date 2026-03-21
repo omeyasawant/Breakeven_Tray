@@ -8,6 +8,7 @@ import platform
 import re
 import stat
 import subprocess
+import tempfile
 import threading
 import time
 import traceback
@@ -99,14 +100,15 @@ SLAVE_SERVICE_FALLBACK = {
 
 DASHBOARD_PROC_TOKENS = [
     "breakeven dashboard",
-    "breakeven.exe",
-    "breakeven",
-    "electron",
+    "breakevendashboard",
+    "breakevendashboard.exe",
 ]
 
 SLAVE_PROC_TOKENS = [
     "breakeven_slave",
+    "breakeven-slave",
     "breakevenslaveservicehost",
+    "breakevenslaveservicehost.exe",
     "slave.exe",
     "slave.py",
 ]
@@ -226,6 +228,7 @@ class BackendController:
         self._state = TrayState()
         self._state_lock = threading.Lock()
         self._config_path = resolve_client_config_path()
+        self._python_command: Optional[str] = None
         log_info(f"Tray script dir: {SCRIPT_DIR}")
         log_info(f"Tray bundle dir: {BUNDLE_DIR}")
         log_info(f"Tray runtime dir: {RUNTIME_DIR}")
@@ -308,23 +311,33 @@ class BackendController:
             "status": ["launchctl", "list", identifier],
         }
 
-    def run_command(self, command: List[str], timeout: int = 15) -> Tuple[int, str, str]:
-        log_info(f"Executing command: {' '.join(command)}")
-        proc = subprocess.run(
-            command,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            shell=False,
-        )
-        return proc.returncode, (proc.stdout or "").strip(), (proc.stderr or "").strip()
+    def run_command(self, command: List[str], timeout: int = 5) -> Tuple[int, str, str]:
+        log_info(f"Executing command (timeout={timeout}s): {' '.join(command[:2])}...")
+        try:
+            proc = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                shell=False,
+            )
+            return proc.returncode, (proc.stdout or "").strip(), (proc.stderr or "").strip()
+        except subprocess.TimeoutExpired:
+            log_error(f"Command timed out after {timeout}s: {command[0]}")
+            return 1, "", f"Command timed out after {timeout}s"
 
     def _process_contains_tokens(self, proc: psutil.Process, tokens: List[str]) -> bool:
         try:
-            name = (proc.name() or "").lower()
-            cmdline = " ".join(proc.cmdline() or []).lower()
+            info = getattr(proc, "info", {}) or {}
+            name = str(info.get("name") or "").lower()
+            raw_cmdline = info.get("cmdline")
+            if isinstance(raw_cmdline, list):
+                cmdline = " ".join(str(part) for part in raw_cmdline).lower()
+            else:
+                cmdline = str(raw_cmdline or "").lower()
             compact_name = compact_process_text(name)
             compact_cmdline = compact_process_text(cmdline)
+
             for token in tokens:
                 token_lower = token.lower()
                 compact_token = compact_process_text(token_lower)
@@ -447,32 +460,375 @@ class BackendController:
         return None
 
     def find_dashboard_processes(self, launch_target: Optional[str]) -> List[psutil.Process]:
-        tokens = list(DASHBOARD_PROC_TOKENS)
-        if launch_target:
-            target_name = os.path.basename(launch_target).lower()
-            tokens.append(target_name)
-            if target_name.endswith(".exe"):
-                tokens.append(target_name.replace(".exe", ""))
-            compact_target = compact_process_text(target_name)
-            if compact_target:
-                tokens.append(compact_target)
-
         matches: List[psutil.Process] = []
         seen_pids = set()
-        for proc in psutil.process_iter(attrs=[]):
-            if self._process_matches_path(proc, launch_target) or self._process_contains_tokens(proc, tokens):
+        for proc in psutil.process_iter(attrs=["name", "cmdline"]):
+            if self._is_dashboard_process(proc, launch_target):
                 if proc.pid in seen_pids:
                     continue
                 seen_pids.add(proc.pid)
                 matches.append(proc)
         return matches
 
+    def _is_dashboard_process(self, proc: psutil.Process, launch_target: Optional[str]) -> bool:
+        try:
+            info = getattr(proc, "info", {}) or {}
+            name = str(info.get("name") or "").lower()
+            raw_cmdline = info.get("cmdline") or []
+            cmdline = " ".join(str(part) for part in raw_cmdline).lower()
+            cmdline_parts = [str(part) for part in raw_cmdline]
+
+            compact_name = compact_process_text(name)
+            compact_cmdline = compact_process_text(cmdline)
+            compact_cmdline_parts = {
+                compact_process_text(part)
+                for part in cmdline_parts
+                if part
+            }
+            compact_cmdline_basenames = {
+                compact_process_text(os.path.basename(part))
+                for part in cmdline_parts
+                if part
+            }
+
+            # Exclude non-dashboard Breakeven processes that previously caused false positives.
+            excluded_tokens = [
+                "breakevenslave",
+                "slaveservicehost",
+                "breakevenupdater",
+                "taskkillexe",
+                "powershellexe",
+                "cmdexe",
+            ]
+            if any(token in compact_name for token in excluded_tokens):
+                return False
+            if any(token in compact_cmdline for token in excluded_tokens):
+                return False
+
+            if launch_target and self._process_matches_path(proc, launch_target):
+                return True
+
+            target_tokens = {
+                compact_process_text(token)
+                for token in DASHBOARD_PROC_TOKENS
+                if token
+            }
+            launch_target_compact = ""
+            launch_target_stem_compact = ""
+            if launch_target:
+                target_name = os.path.basename(launch_target).lower()
+                launch_target_compact = compact_process_text(target_name)
+                stem, _ext = os.path.splitext(target_name)
+                launch_target_stem_compact = compact_process_text(stem)
+                if "dashboard" in launch_target_compact:
+                    target_tokens.add(launch_target_compact)
+                if "dashboard" in launch_target_stem_compact:
+                    target_tokens.add(launch_target_stem_compact)
+
+            target_tokens = {token for token in target_tokens if token}
+
+            # Accept exact executable-name matches for known dashboard binaries.
+            if compact_name in target_tokens:
+                return True
+
+            # Command line matches must be exact argument/basename matches, not substrings.
+            if target_tokens & compact_cmdline_parts:
+                return True
+            if target_tokens & compact_cmdline_basenames:
+                return True
+
+            if launch_target_compact and "dashboard" in launch_target_compact:
+                if launch_target_compact in compact_cmdline_basenames:
+                    return True
+            if launch_target_stem_compact and "dashboard" in launch_target_stem_compact:
+                if launch_target_stem_compact in compact_cmdline_basenames:
+                    return True
+
+            if "breakevendashboard" in compact_cmdline:
+                return True
+            if "dashboardgui" in compact_cmdline and "breakeven" in compact_cmdline:
+                return True
+
+            return False
+        except Exception:
+            return False
+
     def find_slave_processes(self) -> List[psutil.Process]:
         matches: List[psutil.Process] = []
-        for proc in psutil.process_iter(attrs=[]):
-            if self._process_contains_tokens(proc, SLAVE_PROC_TOKENS):
-                matches.append(proc)
+        log_info(f"[PROCESS_SCAN] Scanning for slave processes with tokens: {SLAVE_PROC_TOKENS}")
+        try:
+            for proc in psutil.process_iter(attrs=["name", "cmdline"]):
+                if self._process_contains_tokens(proc, SLAVE_PROC_TOKENS):
+                    matches.append(proc)
+        except Exception as exc:
+            log_error(f"[PROCESS_SCAN] Error iterating processes: {exc}")
+        log_info(f"[PROCESS_SCAN] Process scan complete. Matches: {len(matches)}")
         return matches
+
+    def _is_runtime_slave_process(self, proc: psutil.Process) -> bool:
+        try:
+            info = getattr(proc, "info", {}) or {}
+            name = str(info.get("name") or "").lower()
+            raw_cmdline = info.get("cmdline") or []
+            cmdline = " ".join(str(part) for part in raw_cmdline).lower()
+
+            compact_name = compact_process_text(name)
+            compact_cmdline = compact_process_text(cmdline)
+
+            # Ignore helper/system tools whose command line can mention slave image names.
+            if compact_name in {"taskkillexe", "powershellexe", "pwshexe", "cmdexe"}:
+                return False
+
+            # Service host alone is not enough to consider slave fully started.
+            if "servicehost" in compact_name:
+                return False
+
+            if "breakevenslave" in compact_name:
+                return True
+
+            if "breakevenslave" in compact_cmdline and "servicehost" not in compact_cmdline:
+                return True
+
+            if "slavepy" in compact_cmdline:
+                return True
+
+            return False
+        except Exception:
+            return False
+
+    def find_runtime_slave_processes(self) -> List[psutil.Process]:
+        matches: List[psutil.Process] = []
+        try:
+            for proc in psutil.process_iter(attrs=["name", "cmdline"]):
+                if self._is_runtime_slave_process(proc):
+                    matches.append(proc)
+        except Exception as exc:
+            log_error(f"[SLAVE_RUNTIME] Error iterating processes: {exc}")
+        return matches
+
+    def resolve_client_service_dir(self, config: dict) -> Optional[str]:
+        install_path = config.get("installPath")
+        service_install_path = config.get("serviceInstallPath")
+        candidates: List[str] = []
+        if service_install_path:
+            candidates.extend([
+                os.path.join(service_install_path, "client_service"),
+                service_install_path,
+            ])
+        if install_path:
+            candidates.extend([
+                os.path.join(install_path, "client_service"),
+                install_path,
+            ])
+
+        seen = set()
+        for candidate in candidates:
+            normalized = os.path.normpath(candidate)
+            if normalized in seen:
+                continue
+            seen.add(normalized)
+            if not os.path.isdir(normalized):
+                continue
+            slave_candidates = [
+                os.path.join(normalized, "Breakeven_Slave.exe"),
+                os.path.join(normalized, "Breakeven_Slave.py"),
+                os.path.join(normalized, "Breakeven_Slave-x86_64.AppImage"),
+            ]
+            if any(os.path.exists(path) for path in slave_candidates):
+                return normalized
+
+        return os.path.normpath(candidates[0]) if candidates else None
+
+    def resolve_python_interpreter(self) -> Optional[str]:
+        if self._python_command:
+            return self._python_command
+        candidates = ["py", "python", "python3"] if get_os_type() == "windows" else ["python3", "python"]
+        for candidate in candidates:
+            try:
+                subprocess.run(
+                    [candidate, "--version"],
+                    capture_output=True,
+                    text=True,
+                    timeout=8,
+                    shell=False,
+                    check=False,
+                )
+                self._python_command = candidate
+                return candidate
+            except Exception:
+                continue
+        return None
+
+    def resolve_slave_launch_command(self, service_dir: Optional[str]) -> Optional[List[str]]:
+        if not service_dir:
+            return None
+
+        exe_path = os.path.join(service_dir, "Breakeven_Slave.exe")
+        if os.path.exists(exe_path):
+            return [exe_path]
+
+        py_path = os.path.join(service_dir, "Breakeven_Slave.py")
+        if os.path.exists(py_path):
+            python_cmd = self.resolve_python_interpreter()
+            if python_cmd:
+                return [python_cmd, py_path]
+
+        appimage_path = os.path.join(service_dir, "Breakeven_Slave-x86_64.AppImage")
+        if os.path.exists(appimage_path):
+            return [appimage_path]
+
+        return None
+
+    def launch_slave_binary_fallback(self, config: dict) -> None:
+        service_dir = self.resolve_client_service_dir(config)
+        if not service_dir or not os.path.isdir(service_dir):
+            raise RuntimeError("Client service directory not found. Check client_config.json paths.")
+
+        launch_cmd = self.resolve_slave_launch_command(service_dir)
+        if not launch_cmd:
+            raise RuntimeError("No Breakeven_Slave launch target found in service directory.")
+
+        subprocess.Popen(
+            launch_cmd,
+            cwd=service_dir,
+            shell=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL,
+            creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if get_os_type() == "windows" else 0,
+        )
+
+    def terminate_slave_processes_fallback(self) -> None:
+        errors: List[str] = []
+        processes = self.find_slave_processes()
+        for proc in processes:
+            try:
+                proc.terminate()
+            except Exception as exc:
+                errors.append(str(exc))
+
+        if processes:
+            try:
+                psutil.wait_procs(processes, timeout=3)
+            except Exception:
+                pass
+
+        for proc in self.find_slave_processes():
+            try:
+                proc.kill()
+            except Exception as exc:
+                errors.append(str(exc))
+
+        if get_os_type() == "windows":
+            image_names = ["Breakeven_Slave.exe", "BreakEvenSlaveServiceHost.exe"]
+            for image_name in image_names:
+                try:
+                    subprocess.run(
+                        ["taskkill", "/IM", image_name, "/T", "/F"],
+                        capture_output=True,
+                        text=True,
+                        timeout=10,
+                        shell=False,
+                    )
+                except Exception as exc:
+                    errors.append(str(exc))
+
+        if self.is_slave_process_running():
+            raise RuntimeError(errors[0] if errors else "Slave process is still running")
+
+    def stop_slave_with_windows_elevation(self) -> bool:
+        if get_os_type() != "windows":
+            return False
+
+        service_name = SLAVE_SERVICE_FALLBACK["windows"]
+        script_name = f"breakeven_stop_slave_{int(time.time() * 1000)}.ps1"
+        script_path = os.path.join(tempfile.gettempdir(), script_name)
+        script_body = (
+            "$ErrorActionPreference = 'SilentlyContinue'\n"
+            f"Stop-Service -Name '{service_name}' -Force\n"
+            "Start-Sleep -Milliseconds 800\n"
+            "taskkill /IM Breakeven_Slave.exe /T /F | Out-Null\n"
+            "taskkill /IM BreakEvenSlaveServiceHost.exe /T /F | Out-Null\n"
+            f"$svc = Get-Service -Name '{service_name}' -ErrorAction SilentlyContinue\n"
+            "if ($svc -and $svc.Status -ne 'Stopped') { exit 1 }\n"
+            "exit 0\n"
+        )
+
+        try:
+            with open(script_path, "w", encoding="utf-8") as handle:
+                handle.write(script_body)
+
+            escaped_path = script_path.replace("'", "''")
+            elevate_cmd = (
+                "$p = Start-Process -FilePath 'powershell.exe' -Verb RunAs -PassThru -Wait "
+                f"-ArgumentList @('-NoLogo','-NoProfile','-ExecutionPolicy','Bypass','-File','{escaped_path}'); "
+                "exit $p.ExitCode"
+            )
+
+            code, _stdout, stderr = self.run_command(
+                ["powershell.exe", "-NoLogo", "-NoProfile", "-Command", elevate_cmd],
+                timeout=60,
+            )
+            if code == 0:
+                return True
+
+            log_error(f"[STOP SLAVE] Elevated stop failed (code={code}): {stderr}")
+            return False
+        except Exception as exc:
+            log_error(f"[STOP SLAVE] Elevated stop exception: {exc}")
+            return False
+        finally:
+            try:
+                if os.path.exists(script_path):
+                    os.remove(script_path)
+            except Exception:
+                pass
+
+    def start_slave_with_windows_elevation(self) -> bool:
+        if get_os_type() != "windows":
+            return False
+
+        service_name = SLAVE_SERVICE_FALLBACK["windows"]
+        script_name = f"breakeven_start_slave_{int(time.time() * 1000)}.ps1"
+        script_path = os.path.join(tempfile.gettempdir(), script_name)
+        script_body = (
+            "$ErrorActionPreference = 'SilentlyContinue'\n"
+            f"Start-Service -Name '{service_name}'\n"
+            "Start-Sleep -Milliseconds 1200\n"
+            "$procs = @(Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.ProcessName -match 'Breakeven_Slave|BreakEvenSlaveServiceHost' })\n"
+            "if ($procs.Count -gt 0) { exit 0 }\n"
+            "exit 1\n"
+        )
+
+        try:
+            with open(script_path, "w", encoding="utf-8") as handle:
+                handle.write(script_body)
+
+            escaped_path = script_path.replace("'", "''")
+            elevate_cmd = (
+                "$p = Start-Process -FilePath 'powershell.exe' -Verb RunAs -PassThru -Wait "
+                f"-ArgumentList @('-NoLogo','-NoProfile','-ExecutionPolicy','Bypass','-File','{escaped_path}'); "
+                "exit $p.ExitCode"
+            )
+
+            code, _stdout, stderr = self.run_command(
+                ["powershell.exe", "-NoLogo", "-NoProfile", "-Command", elevate_cmd],
+                timeout=60,
+            )
+            if code == 0:
+                return True
+
+            log_error(f"[START SLAVE] Elevated start failed (code={code}): {stderr}")
+            return False
+        except Exception as exc:
+            log_error(f"[START SLAVE] Elevated start exception: {exc}")
+            return False
+        finally:
+            try:
+                if os.path.exists(script_path):
+                    os.remove(script_path)
+            except Exception:
+                pass
 
     def is_dashboard_running(self) -> bool:
         try:
@@ -481,8 +837,25 @@ class BackendController:
         except Exception:
             launch_target = None
 
-        if self._dashboard_handle is not None and self._dashboard_handle.poll() is None:
-            return True
+        if self._dashboard_handle is not None:
+            try:
+                if self._dashboard_handle.poll() is None:
+                    handle_pid = self._dashboard_handle.pid
+                    handle_proc = psutil.Process(handle_pid)
+                    handle_proc.info = {
+                        "name": handle_proc.name(),
+                        "cmdline": handle_proc.cmdline(),
+                    }
+                    if self._is_dashboard_process(handle_proc, launch_target):
+                        return True
+
+                    log_info(f"[DASHBOARD] Clearing stale dashboard handle pid={handle_pid}")
+                    self._dashboard_handle = None
+                else:
+                    self._dashboard_handle = None
+            except Exception:
+                self._dashboard_handle = None
+
         return bool(self.find_dashboard_processes(launch_target))
 
     def open_dashboard(self) -> None:
@@ -665,79 +1038,150 @@ class BackendController:
             raise RuntimeError("Dashboard is not running.")
 
     def is_slave_process_running(self) -> bool:
-        return bool(self.find_slave_processes())
+        runtime_processes = self.find_runtime_slave_processes()
+        all_processes = self.find_slave_processes()
+        log_info(
+            f"[SLAVE_PROCESS] Found {len(runtime_processes)} runtime slave process(es) "
+            f"({len(all_processes)} total related process(es))"
+        )
+        for proc in runtime_processes:
+            try:
+                info = getattr(proc, "info", {}) or {}
+                name = info.get("name") or "unknown"
+                cmdline = info.get("cmdline") or []
+                cmdline_text = " ".join(str(part) for part in cmdline)[:100]
+                log_info(f"[SLAVE_PROCESS]   - RUNTIME PID {proc.pid}: {name} | {cmdline_text}")
+            except Exception:
+                pass
+        for proc in all_processes:
+            try:
+                info = getattr(proc, "info", {}) or {}
+                name = info.get("name") or "unknown"
+                cmdline = info.get("cmdline") or []
+                cmdline_text = " ".join(str(part) for part in cmdline)[:100]
+                log_info(f"[SLAVE_PROCESS]   - RELATED PID {proc.pid}: {name} | {cmdline_text}")
+            except Exception:
+                pass
+        return bool(runtime_processes)
 
     def is_slave_running(self) -> bool:
-        config = self.load_config()
-        commands = self.resolve_slave_control_commands(config)
-        status_cmd = commands.get("status")
-        service_running = False
-
-        if status_cmd:
-            try:
-                code, stdout, stderr = self.run_command(status_cmd)
-                text = f"{stdout}\n{stderr}".lower()
-                os_type = get_os_type()
-                if os_type == "windows":
-                    service_running = "running" in text and "stopped" not in text
-                elif os_type == "linux":
-                    service_running = code == 0 and "active" in text
-                else:
-                    service_running = code == 0 and "could not find service" not in text
-            except Exception as exc:
-                log_error(f"Slave status lookup failed: {exc}")
-
-        if service_running:
-            return True
-        return self.is_slave_process_running()
+        log_info("[SLAVE_STATUS] Checking slave status via process scan...")
+        try:
+            process_running = self.is_slave_process_running()
+            log_info(f"[SLAVE_STATUS] Slave process detected: {process_running}")
+            return process_running
+        except Exception as exc:
+            log_error(f"[SLAVE_STATUS] Error during slave check: {exc}")
+            return False
 
     def start_slave(self) -> None:
+        log_info("[START SLAVE] Attempting to start slave service...")
         config = self.load_config()
         commands = self.resolve_slave_control_commands(config)
         start_cmd = commands.get("start")
-        if not start_cmd:
-            raise RuntimeError("No slave start command found")
-        code, _stdout, stderr = self.run_command(start_cmd)
-        if code != 0:
-            raise RuntimeError(stderr or f"Failed to start slave service (code={code})")
+        start_errors: List[str] = []
+        service_permission_denied = False
+
+        if start_cmd:
+            try:
+                log_info(f"[START SLAVE] Using service control: {start_cmd[0]}")
+                code, _stdout, stderr = self.run_command(start_cmd)
+                if code != 0:
+                    log_error(f"[START SLAVE] Service start failed (code={code}): {stderr}")
+                    lowered = (stderr or "").lower()
+                    if get_os_type() == "windows" and (
+                        "cannot open" in lowered
+                        or "access is denied" in lowered
+                        or "permission" in lowered
+                    ):
+                        service_permission_denied = True
+                    start_errors.append(stderr or f"Failed to start slave service (code={code})")
+                else:
+                    log_info("[START SLAVE] Service start command succeeded")
+            except Exception as exc:
+                log_error(f"[START SLAVE] Service start exception: {exc}")
+                start_errors.append(str(exc))
+
+        if service_permission_denied and get_os_type() == "windows" and not self.is_slave_running():
+            log_info("[START SLAVE] Retrying service start with elevated PowerShell prompt...")
+            self.start_slave_with_windows_elevation()
+
+        if not self.is_slave_running():
+            try:
+                log_info("[START SLAVE] Service did not start; using binary fallback...")
+                self.launch_slave_binary_fallback(config)
+                log_info("[START SLAVE] Binary fallback launched")
+            except Exception as fallback_exc:
+                log_error(f"[START SLAVE] Binary fallback failed: {fallback_exc}")
+                start_errors.append(str(fallback_exc))
+
+        for i in range(6):
+            if self.is_slave_running():
+                log_info("[START SLAVE] ✓ Slave is now RUNNING")
+                return
+            time.sleep(0.5)
+
+        detail = start_errors[0] if start_errors else "Slave did not start"
+        if service_permission_denied and get_os_type() == "windows":
+            detail = "Administrator permission is required to start BreakEvenSlave service. Please run tray_app as Administrator and try again."
+        log_error(f"[START SLAVE] ✗ Slave failed to start: {detail}")
+        raise RuntimeError(detail)
 
     def stop_slave(self) -> None:
+        log_info("[STOP SLAVE] Attempting to stop slave service...")
         config = self.load_config()
         commands = self.resolve_slave_control_commands(config)
         stop_cmd = commands.get("stop")
         errors: List[str] = []
+        service_permission_denied = False
         if stop_cmd:
             try:
+                log_info(f"[STOP SLAVE] Using service control: {stop_cmd[0]}")
                 code, _stdout, stderr = self.run_command(stop_cmd)
                 if code != 0:
+                    log_error(f"[STOP SLAVE] Service stop failed (code={code}): {stderr}")
+                    lowered = (stderr or "").lower()
+                    if get_os_type() == "windows" and (
+                        "cannot open" in lowered
+                        or "access is denied" in lowered
+                        or "permission" in lowered
+                    ):
+                        service_permission_denied = True
                     errors.append(stderr or f"Failed to stop slave service (code={code})")
+                else:
+                    log_info("[STOP SLAVE] Service stop command succeeded")
             except Exception as exc:
+                log_error(f"[STOP SLAVE] Service stop exception: {exc}")
                 errors.append(str(exc))
 
-        processes = self.find_slave_processes()
-        for proc in processes:
+        for attempt in range(3):
             try:
-                proc.terminate()
+                log_info(f"[STOP SLAVE] Force-terminating processes (attempt {attempt+1}/3)...")
+                self.terminate_slave_processes_fallback()
             except Exception as exc:
+                log_error(f"[STOP SLAVE] Termination failed: {exc}")
                 errors.append(str(exc))
 
-        if get_os_type() == "windows":
-            for proc in self.find_slave_processes():
-                try:
-                    subprocess.run(
-                        ["taskkill", "/PID", str(proc.pid), "/T", "/F"],
-                        capture_output=True,
-                        text=True,
-                        timeout=10,
-                        shell=False,
-                    )
-                except Exception as exc:
-                    errors.append(str(exc))
+            time.sleep(1.0)
+            if not self.is_slave_running():
+                log_info("[STOP SLAVE] ✓ Slave is now STOPPED")
+                return
 
-        time.sleep(1.0)
-        if self.is_slave_running():
-            detail = errors[0] if errors else "Slave is still running after stop attempt"
-            raise RuntimeError(detail)
+        if service_permission_denied and get_os_type() == "windows":
+            log_info("[STOP SLAVE] Retrying service stop with elevated PowerShell prompt...")
+            self.stop_slave_with_windows_elevation()
+
+            for _ in range(8):
+                time.sleep(0.5)
+                if not self.is_slave_running():
+                    log_info("[STOP SLAVE] ✓ Slave stopped after elevated retry")
+                    return
+
+        detail = errors[0] if errors else "Slave is still running after stop attempt"
+        if service_permission_denied and get_os_type() == "windows":
+            detail = "Administrator permission is required to stop BreakEvenSlave service. Please run tray_app as Administrator and try again."
+        log_error(f"[STOP SLAVE] ✗ Slave failed to stop: {detail}")
+        raise RuntimeError(detail)
 
     def refresh_local_state(self) -> TrayState:
         current = self.get_cached_state()
@@ -797,13 +1241,39 @@ class BackendController:
             return state
 
     def snapshot_state(self) -> TrayState:
+        log_info("[SNAPSHOT] Starting state snapshot...")
+        
+        # Check dashboard - relatively quick
+        log_info("[SNAPSHOT] Checking dashboard status...")
+        dashboard_running = False
+        try:
+            dashboard_running = self.is_dashboard_running()
+        except Exception as exc:
+            log_error(f"[SNAPSHOT] Dashboard check failed: {exc}")
+        log_info(f"[SNAPSHOT] Dashboard: {dashboard_running}")
+        
+        # Check slave - should be very fast now  
+        log_info("[SNAPSHOT] Checking slave status...")
+        slave_running = False
+        try:
+            slave_running = self.is_slave_running()
+        except Exception as exc:
+            log_error(f"[SNAPSHOT] Slave check failed: {exc}")
+        log_info(f"[SNAPSHOT] Slave: {slave_running}")
+        
+        # Update state is fetched separately in background - skip in this snapshot
+        # to avoid network timeouts blocking the UI  
+        log_info("[SNAPSHOT] Skipping update check in snapshot (fetched separately)")
+        update_state = UpdateState(checked_at=time.time())
+        
         state = TrayState(
-            dashboard_running=self.is_dashboard_running(),
-            slave_running=self.is_slave_running(),
-            update_state=self.fetch_update_state(),
+            dashboard_running=dashboard_running,
+            slave_running=slave_running,
+            update_state=update_state,
         )
         with self._state_lock:
             self._state = state
+        log_info(f"[SNAPSHOT] Complete: dashboard={dashboard_running}, slave={slave_running}")
         return state
 
     def get_cached_state(self) -> TrayState:
@@ -830,13 +1300,15 @@ class TrayApp(QtWidgets.QSystemTrayIcon):
         self.setToolTip('BreakEven Client Service')
         self.paused = False
         self.service_process = None
+        self._status_ready = False
         self.backend = BackendController()
         self.menu = QMenu(parent)
 
         self.dashboard_action = self.menu.addAction("🖥 Open Dashboard")
         self.dashboard_action.triggered.connect(self.open_dashboard)
 
-        self.slave_action = self.menu.addAction("⏸ Pause Service")
+        self.slave_action = self.menu.addAction("⏳ Detecting Slave Status...")
+        self.slave_action.setEnabled(False)
         self.slave_action.triggered.connect(self.toggle_slave)
 
         self.update_action = self.menu.addAction("⬇ Check for Updates")
@@ -845,6 +1317,7 @@ class TrayApp(QtWidgets.QSystemTrayIcon):
         self.quit_action = self.menu.addAction("❌ Quit")
         self.quit_action.triggered.connect(self.quit_app)
 
+        self.menu.aboutToShow.connect(self.prepare_menu_state)
         self.setContextMenu(self.menu)
         self.activated.connect(self.icon_activated)
         self.refresh_ready.connect(self.refresh_menu_state)
@@ -861,18 +1334,28 @@ class TrayApp(QtWidgets.QSystemTrayIcon):
 
     def icon_activated(self, reason):
         if reason == QSystemTrayIcon.Trigger:
-            self.refresh_menu_state()
+            self.prepare_menu_state()
             self.contextMenu().popup(QtGui.QCursor.pos())
             self.refresh_state_async()
 
+    def prepare_menu_state(self):
+        try:
+            self.backend.refresh_dashboard_state()
+        except Exception as exc:
+            log_error(f"[MENU] Dashboard refresh before show failed: {exc}")
+        self.refresh_menu_state()
+
     def refresh_menu_state(self):
         state = self.backend.get_cached_state()
+        self._status_ready = True
+        log_info(f"[MENU] Refreshing menu state: dashboard={state.dashboard_running}, slave={state.slave_running}")
         self.dashboard_action.setText(
             "❎ Close Dashboard" if state.dashboard_running else "🖥 Open Dashboard"
         )
-        self.slave_action.setText(
-            "🛑 Stop Slave" if state.slave_running else "▶ Start Slave"
-        )
+        slave_text = "🛑 Stop Slave" if state.slave_running else "▶ Start Slave"
+        self.slave_action.setText(slave_text)
+        log_info(f"[MENU] Slave button text set to: {slave_text}")
+        self.slave_action.setEnabled(True)
 
         if state.update_state.error:
             self.update_action.setText("⬇ Check for Updates (error)")
@@ -891,13 +1374,31 @@ class TrayApp(QtWidgets.QSystemTrayIcon):
         if self._refresh_in_flight:
             return
         self._refresh_in_flight = True
+        log_info("[MENU] Starting async state refresh...")
 
         def worker():
             try:
-                self.backend.snapshot_state()
+                log_info("[WORKER] Running snapshot_state() with 8s timeout...")
+                result = [None]
+                
+                def snapshot_wrapper():
+                    try:
+                        result[0] = self.backend.snapshot_state()
+                    except Exception as exc:
+                        log_error(f"[WORKER] snapshot_state exception: {exc}")
+                
+                snapshot_thread = threading.Thread(target=snapshot_wrapper, daemon=True)
+                snapshot_thread.start()
+                snapshot_thread.join(timeout=8)
+                
+                if result[0] is not None:
+                    log_info("[WORKER] Snapshot complete, emitting signal...")
+                else:
+                    log_error("[WORKER] Snapshot timeout or failed")
                 self.refresh_ready.emit()
             except Exception as exc:
                 log_error(f"Status refresh failed: {exc}")
+                self.refresh_ready.emit()
             finally:
                 self._refresh_in_flight = False
 
@@ -966,14 +1467,17 @@ class TrayApp(QtWidgets.QSystemTrayIcon):
                 )
 
     def open_dashboard(self):
-        state = self.backend.get_cached_state()
+        state = self.backend.refresh_dashboard_state()
+        log_info(f"[DASHBOARD] Button clicked. Current state: dashboard_running={state.dashboard_running}")
         if state.dashboard_running:
+            log_info("[DASHBOARD] Closing dashboard...")
             self.run_dashboard_action(
                 self.backend.close_dashboard,
                 "Dashboard toggle failed",
                 expected_dashboard_running=False,
             )
             return
+        log_info("[DASHBOARD] Opening dashboard...")
         self.run_dashboard_action(
             self.backend.open_dashboard,
             "Dashboard toggle failed",
@@ -982,13 +1486,16 @@ class TrayApp(QtWidgets.QSystemTrayIcon):
 
     def toggle_slave(self):
         state = self.backend.refresh_local_state()
+        log_info(f"[TOGGLE SLAVE] Button clicked. Current state: slave_running={state.slave_running}")
         if state.slave_running:
+            log_info("[TOGGLE SLAVE] Initiating STOP operation...")
             self.run_action_async(
                 self.backend.stop_slave,
                 "Failed to stop slave service",
                 post_action_refresh=self.backend.refresh_slave_state,
             )
             return
+        log_info("[TOGGLE SLAVE] Initiating START operation...")
         self.run_action_async(
             self.backend.start_slave,
             "Failed to start slave service",
@@ -996,9 +1503,11 @@ class TrayApp(QtWidgets.QSystemTrayIcon):
         )
 
     def check_updates(self):
+        log_info("[UPDATES] Button clicked, checking for updates...")
         self.refresh_state_async()
         state = self.backend.get_cached_state().update_state
         if state.error:
+            log_error(f"[UPDATES] Check failed: {state.error}")
             self.showMessage(
                 "BreakEven Tray",
                 f"Update check failed: {state.error}",
@@ -1009,10 +1518,13 @@ class TrayApp(QtWidgets.QSystemTrayIcon):
 
         if state.up_to_date is True:
             message = f"Client is up to date ({state.local_version})"
+            log_info(f"[UPDATES] {message}")
         elif state.up_to_date is False:
             message = f"Update available: {state.latest_version}"
+            log_info(f"[UPDATES] {message}")
         else:
             message = "Update status unavailable"
+            log_info(f"[UPDATES] {message}")
 
         self.showMessage(
             "BreakEven Tray",
@@ -1030,6 +1542,7 @@ class TrayApp(QtWidgets.QSystemTrayIcon):
             return None
 
     def quit_app(self):
+        log_info("[QUIT] Quit button clicked. Shutting down tray_app...")
         self.refresh_timer.stop()
         QApplication.quit()
 
