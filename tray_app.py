@@ -1082,7 +1082,12 @@ class BackendController:
         start_errors: List[str] = []
         service_permission_denied = False
 
-        if start_cmd:
+        if get_os_type() == "windows":
+            log_info("[START SLAVE] Using elevated Windows service start...")
+            if not self.start_slave_with_windows_elevation():
+                start_errors.append("Failed to start slave service with elevation")
+
+        elif start_cmd:
             try:
                 log_info(f"[START SLAVE] Using service control: {start_cmd[0]}")
                 code, _stdout, stderr = self.run_command(start_cmd)
@@ -1134,7 +1139,13 @@ class BackendController:
         stop_cmd = commands.get("stop")
         errors: List[str] = []
         service_permission_denied = False
-        if stop_cmd:
+
+        if get_os_type() == "windows":
+            log_info("[STOP SLAVE] Using elevated Windows service stop...")
+            if not self.stop_slave_with_windows_elevation():
+                errors.append("Failed to stop slave service with elevation")
+
+        elif stop_cmd:
             try:
                 log_info(f"[STOP SLAVE] Using service control: {stop_cmd[0]}")
                 code, _stdout, stderr = self.run_command(stop_cmd)
