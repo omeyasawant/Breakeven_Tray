@@ -208,6 +208,10 @@ def configure_linux_qt_runtime() -> None:
         exe_dir = os.path.dirname(os.path.abspath(sys.executable))
         runtime_roots.extend([exe_dir, os.path.join(exe_dir, "_internal")])
 
+    # AppImage and PyInstaller onedir layouts may place Qt under an extra
+    # _internal directory, so include both the launch root and that nested root.
+    runtime_roots.extend([os.path.join(root, "_internal") for root in list(runtime_roots)])
+
     plugin_roots: List[str] = []
     library_roots: List[str] = []
     for root in runtime_roots:
@@ -215,11 +219,15 @@ def configure_linux_qt_runtime() -> None:
             os.path.join(root, "PyQt5", "Qt5", "plugins"),
             os.path.join(root, "PyQt5", "Qt", "plugins"),
             os.path.join(root, "qt5_plugins"),
+            os.path.join(root, "_internal", "PyQt5", "Qt5", "plugins"),
+            os.path.join(root, "_internal", "PyQt5", "Qt", "plugins"),
         ])
         library_roots.extend([
             root,
             os.path.join(root, "PyQt5", "Qt5", "lib"),
             os.path.join(root, "PyQt5", "Qt", "lib"),
+            os.path.join(root, "_internal", "PyQt5", "Qt5", "lib"),
+            os.path.join(root, "_internal", "PyQt5", "Qt", "lib"),
         ])
 
     prepend_env_path("QT_PLUGIN_PATH", plugin_roots)
