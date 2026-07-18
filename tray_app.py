@@ -12,6 +12,7 @@ import tempfile
 import threading
 import time
 import traceback
+import signal
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 from urllib.parse import urljoin
@@ -58,6 +59,19 @@ def first_existing_path(paths: List[str]) -> Optional[str]:
         if os.path.exists(normalized):
             return normalized
     return None
+
+
+def existing_dirs(paths: List[str]) -> List[str]:
+    seen = set()
+    matches: List[str] = []
+    for candidate in paths:
+        normalized = os.path.normpath(candidate)
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        if os.path.isdir(normalized):
+            matches.append(normalized)
+    return matches
 
 
 def resolve_client_config_path() -> str:
@@ -161,6 +175,112 @@ def get_os_type() -> str:
     if os_name == "darwin":
         return "macos"
     raise RuntimeError(f"Unsupported OS: {os_name}")
+
+
+def prepend_env_path(name: str, candidate_paths: List[str]) -> None:
+    existing = [path for path in existing_dirs(candidate_paths) if path]
+    if not existing:
+        return
+
+    current = [part for part in os.environ.get(name, "").split(os.pathsep) if part]
+    merged: List[str] = []
+    seen = set()
+    for value in existing + current:
+        normalized = os.path.normcase(os.path.normpath(value))
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        merged.append(value)
+    os.environ[name] = os.pathsep.join(merged)
+
+
+def configure_linux_qt_runtime() -> None:
+    if get_os_type() != "linux":
+        return
+
+    runtime_roots = [BUNDLE_DIR, SCRIPT_DIR, RUNTIME_DIR, os.getcwd()]
+
+    meipass_dir = getattr(sys, "_MEIPASS", None)
+    if meipass_dir:
+        runtime_roots.insert(0, meipass_dir)
+
+    if getattr(sys, "frozen", False):
+        exe_dir = os.path.dirname(os.path.abspath(sys.executable))
+        runtime_roots.extend([exe_dir, os.path.join(exe_dir, "_internal")])
+
+    plugin_roots: List[str] = []
+    library_roots: List[str] = []
+    for root in runtime_roots:
+        plugin_roots.extend([
+            os.path.join(root, "PyQt5", "Qt5", "plugins"),
+            os.path.join(root, "PyQt5", "Qt", "plugins"),
+            os.path.join(root, "qt5_plugins"),
+        ])
+        library_roots.extend([
+            root,
+            os.path.join(root, "PyQt5", "Qt5", "lib"),
+            os.path.join(root, "PyQt5", "Qt", "lib"),
+        ])
+
+    prepend_env_path("QT_PLUGIN_PATH", plugin_roots)
+    prepend_env_path("LD_LIBRARY_PATH", library_roots)
+
+    platform_plugin_dir = first_existing_path([
+        os.path.join(path, "platforms")
+        for path in existing_dirs(plugin_roots)
+    ])
+    if platform_plugin_dir:
+        os.environ.setdefault("QT_QPA_PLATFORM_PLUGIN_PATH", platform_plugin_dir)
+
+    os.environ.setdefault("QT_AUTO_SCREEN_SCALE_FACTOR", "1")
+    os.environ.setdefault("QT_X11_NO_MITSHM", "1")
+
+
+def linux_graphical_session_available() -> bool:
+    if get_os_type() != "linux":
+        return True
+
+    if str(os.environ.get("BREAKEVEN_TRAY_FORCE_GUI") or "").strip() == "1":
+        return True
+
+    if str(os.environ.get("BREAKEVEN_TRAY_HEADLESS") or "").strip() == "1":
+        return False
+
+    display = str(os.environ.get("DISPLAY") or "").strip()
+    wayland_display = str(os.environ.get("WAYLAND_DISPLAY") or "").strip()
+    xdg_session_type = str(os.environ.get("XDG_SESSION_TYPE") or "").strip().lower()
+
+    if display or wayland_display:
+        return True
+
+    return xdg_session_type in {"x11", "wayland"}
+
+
+def run_headless_service_loop(reason: str) -> int:
+    stop_event = threading.Event()
+
+    def _request_stop(signum, _frame):
+        log_info(f"[HEADLESS] Signal received: {signum}")
+        stop_event.set()
+
+    for sig_name in ("SIGTERM", "SIGINT"):
+        sig_value = getattr(signal, sig_name, None)
+        if sig_value is None:
+            continue
+        try:
+            signal.signal(sig_value, _request_stop)
+        except Exception:
+            continue
+
+    log_info(f"[HEADLESS] {reason}")
+    print("tray_app headless mode", flush=True)
+    print("ready", flush=True)
+
+    while not stop_event.wait(60):
+        pass
+
+    log_info("[HEADLESS] Tray headless loop stopped")
+    return 0
 
 
 def read_json(path: str) -> Optional[dict]:
@@ -1560,8 +1680,15 @@ class TrayApp(QtWidgets.QSystemTrayIcon):
 
 def main():
     try:
+        if get_os_type() == "linux":
+            configure_linux_qt_runtime()
+            if not linux_graphical_session_available():
+                sys.exit(run_headless_service_loop("No graphical Linux session detected; skipping Qt tray UI"))
+
         app = QApplication(sys.argv)
         app.setQuitOnLastWindowClosed(False)
+        if not QSystemTrayIcon.isSystemTrayAvailable():
+            sys.exit(run_headless_service_loop("System tray is unavailable in this Linux session; skipping Qt tray UI"))
         icon = QtGui.QIcon(ICON_PATH)
         tray_icon = TrayApp(icon)
         tray_icon.show()

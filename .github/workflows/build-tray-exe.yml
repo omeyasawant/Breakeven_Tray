@@ -70,11 +70,11 @@ jobs:
         if: runner.os == 'Linux'
         shell: bash -l {0}
         run: |
-          python -m PyInstaller --onefile tray_app.py             --name Breakeven_Tray             --add-data "icon.png:."             --hidden-import psutil             --hidden-import requests             --hidden-import packaging             --hidden-import PyQt5
+          python -m PyInstaller --onedir --windowed tray_app.py             --name Breakeven_Tray             --add-data "icon.png:."             --collect-all PyQt5             --hidden-import psutil             --hidden-import requests             --hidden-import packaging             --hidden-import PyQt5
 
           rm -rf AppDir
-          mkdir -p AppDir/usr/bin
-          cp dist/Breakeven_Tray AppDir/usr/bin/Breakeven_Tray
+          mkdir -p AppDir/usr/lib
+          cp -a dist/Breakeven_Tray AppDir/usr/lib/Breakeven_Tray
 
           cat > AppDir/Breakeven_Tray.desktop << 'EOF'
           [Desktop Entry]
@@ -91,7 +91,11 @@ jobs:
           cat > AppDir/AppRun << 'EOF'
           #!/bin/sh
           HERE="$(dirname "$(readlink -f "$0")")"
-          exec "$HERE/usr/bin/Breakeven_Tray" "$@"
+          APPROOT="$HERE/usr/lib/Breakeven_Tray"
+          export QT_PLUGIN_PATH="$APPROOT/_internal/PyQt5/Qt5/plugins:$APPROOT/_internal/PyQt5/Qt/plugins${QT_PLUGIN_PATH:+:$QT_PLUGIN_PATH}"
+          export QT_QPA_PLATFORM_PLUGIN_PATH="$APPROOT/_internal/PyQt5/Qt5/plugins/platforms"
+          export LD_LIBRARY_PATH="$APPROOT/_internal:$APPROOT/_internal/PyQt5/Qt5/lib:$APPROOT/_internal/PyQt5/Qt/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+          exec "$APPROOT/Breakeven_Tray" "$@"
           EOF
           chmod +x AppDir/AppRun
 
