@@ -213,7 +213,8 @@ def configure_linux_qt_runtime() -> None:
     runtime_roots.extend([os.path.join(root, "_internal") for root in list(runtime_roots)])
 
     plugin_roots: List[str] = []
-    library_roots: List[str] = []
+    qt_library_roots: List[str] = []
+    compat_library_roots: List[str] = []
     for root in runtime_roots:
         plugin_roots.extend([
             os.path.join(root, "PyQt5", "Qt5", "plugins"),
@@ -222,16 +223,51 @@ def configure_linux_qt_runtime() -> None:
             os.path.join(root, "_internal", "PyQt5", "Qt5", "plugins"),
             os.path.join(root, "_internal", "PyQt5", "Qt", "plugins"),
         ])
-        library_roots.extend([
-            root,
+        qt_library_roots.extend([
             os.path.join(root, "PyQt5", "Qt5", "lib"),
             os.path.join(root, "PyQt5", "Qt", "lib"),
-            os.path.join(root, "_internal", "PyQt5", "Qt5", "lib"),
-            os.path.join(root, "_internal", "PyQt5", "Qt", "lib"),
+        ])
+        compat_library_roots.extend([
+            os.path.join(root, "qt-host-libs"),
+            os.path.join(root, "_internal", "qt-host-libs"),
         ])
 
+    valid_qt_library_roots = existing_dirs(qt_library_roots)
+    valid_compat_library_roots = existing_dirs(compat_library_roots)
+    allowed_library_roots = valid_qt_library_roots + valid_compat_library_roots
+
+    disallowed_runtime_roots = []
+    for root in runtime_roots:
+        disallowed_runtime_roots.extend([
+            root,
+            os.path.join(root, "_internal"),
+        ])
+
+    current_library_path = [
+        part for part in os.environ.get("LD_LIBRARY_PATH", "").split(os.pathsep) if part
+    ]
+    allowed_library_root_set = {
+        os.path.normcase(os.path.normpath(path)) for path in allowed_library_roots
+    }
+    disallowed_runtime_root_set = {
+        os.path.normcase(os.path.normpath(path)) for path in disallowed_runtime_roots
+    }
+    sanitized_library_path: List[str] = []
+    seen_library_paths = set()
+
+    for part in current_library_path:
+        normalized_part = os.path.normcase(os.path.normpath(part))
+        if normalized_part in seen_library_paths:
+            continue
+        if normalized_part in disallowed_runtime_root_set and normalized_part not in allowed_library_root_set:
+            continue
+        seen_library_paths.add(normalized_part)
+        sanitized_library_path.append(part)
+
+    os.environ["LD_LIBRARY_PATH"] = os.pathsep.join(sanitized_library_path)
+
     prepend_env_path("QT_PLUGIN_PATH", plugin_roots)
-    prepend_env_path("LD_LIBRARY_PATH", library_roots)
+    prepend_env_path("LD_LIBRARY_PATH", allowed_library_roots)
 
     platform_plugin_dir = first_existing_path([
         os.path.join(path, "platforms")
@@ -242,6 +278,14 @@ def configure_linux_qt_runtime() -> None:
 
     os.environ.setdefault("QT_AUTO_SCREEN_SCALE_FACTOR", "1")
     os.environ.setdefault("QT_X11_NO_MITSHM", "1")
+    if str(os.environ.get("BREAKEVEN_QT_DEBUG_PLUGINS") or "").strip() == "1":
+        os.environ["QT_DEBUG_PLUGINS"] = "1"
+
+    log_info(f"[QT] QT_PLUGIN_PATH={os.environ.get('QT_PLUGIN_PATH', '')}")
+    log_info(
+        f"[QT] QT_QPA_PLATFORM_PLUGIN_PATH={os.environ.get('QT_QPA_PLATFORM_PLUGIN_PATH', '')}"
+    )
+    log_info(f"[QT] LD_LIBRARY_PATH={os.environ.get('LD_LIBRARY_PATH', '')}")
 
 
 def linux_graphical_session_available() -> bool:
