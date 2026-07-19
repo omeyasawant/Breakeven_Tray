@@ -276,6 +276,17 @@ def configure_linux_qt_runtime() -> None:
     if platform_plugin_dir:
         os.environ.setdefault("QT_QPA_PLATFORM_PLUGIN_PATH", platform_plugin_dir)
 
+    display = str(os.environ.get("DISPLAY") or "").strip()
+    wayland_display = str(os.environ.get("WAYLAND_DISPLAY") or "").strip()
+    xdg_session_type = str(os.environ.get("XDG_SESSION_TYPE") or "").strip().lower()
+
+    if display and xdg_session_type != "wayland":
+        os.environ.setdefault("QT_QPA_PLATFORM", "xcb")
+    elif wayland_display and xdg_session_type == "wayland":
+        os.environ.setdefault("QT_QPA_PLATFORM", "wayland")
+
+    os.environ.pop("QT_QPA_PLATFORMTHEME", None)
+    os.environ.setdefault("QT_STYLE_OVERRIDE", "Fusion")
     os.environ.setdefault("QT_AUTO_SCREEN_SCALE_FACTOR", "1")
     os.environ.setdefault("QT_X11_NO_MITSHM", "1")
     if str(os.environ.get("BREAKEVEN_QT_DEBUG_PLUGINS") or "").strip() == "1":
@@ -284,6 +295,10 @@ def configure_linux_qt_runtime() -> None:
     log_info(f"[QT] QT_PLUGIN_PATH={os.environ.get('QT_PLUGIN_PATH', '')}")
     log_info(
         f"[QT] QT_QPA_PLATFORM_PLUGIN_PATH={os.environ.get('QT_QPA_PLATFORM_PLUGIN_PATH', '')}"
+    )
+    log_info(f"[QT] QT_QPA_PLATFORM={os.environ.get('QT_QPA_PLATFORM', '')}")
+    log_info(
+        f"[QT] QT_QPA_PLATFORMTHEME={os.environ.get('QT_QPA_PLATFORMTHEME', '')}"
     )
     log_info(f"[QT] LD_LIBRARY_PATH={os.environ.get('LD_LIBRARY_PATH', '')}")
 
