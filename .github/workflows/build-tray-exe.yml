@@ -52,6 +52,13 @@ jobs:
           pip install -r requirements.txt
           pip install pyinstaller==6.3.0
 
+      - name: Install Linux Qt runtime helpers
+        if: runner.os == 'Linux'
+        shell: bash -l {0}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y             libxcb-icccm4             libxcb-image0             libxcb-keysyms1             libxcb-render-util0             libxcb-shape0             libxcb-util1             libxcb-xinerama0             libxcb-xkb1             libxkbcommon-x11-0
+
       - name: Build (Windows .exe)
         if: runner.os == 'Windows'
         shell: bash -l {0}
@@ -75,6 +82,17 @@ jobs:
           rm -rf AppDir
           mkdir -p AppDir/usr/lib
           cp -a dist/Breakeven_Tray AppDir/usr/lib/Breakeven_Tray
+          APPROOT="AppDir/usr/lib/Breakeven_Tray"
+          mkdir -p "$APPROOT/qt-host-libs"
+
+          for helper_lib in             /usr/lib/x86_64-linux-gnu/libxcb-icccm.so.4             /usr/lib/x86_64-linux-gnu/libxcb-image.so.0             /usr/lib/x86_64-linux-gnu/libxcb-keysyms.so.1             /usr/lib/x86_64-linux-gnu/libxcb-render-util.so.0             /usr/lib/x86_64-linux-gnu/libxcb-shape.so.0             /usr/lib/x86_64-linux-gnu/libxcb-util.so.1             /usr/lib/x86_64-linux-gnu/libxcb-xinerama.so.0             /usr/lib/x86_64-linux-gnu/libxcb-xkb.so.1             /usr/lib/x86_64-linux-gnu/libxkbcommon-x11.so.0
+          do
+            if [ -f "$helper_lib" ]; then
+              cp -aL "$helper_lib"* "$APPROOT/qt-host-libs/"
+            fi
+          done
+
+          rm -f             "$APPROOT/_internal/libX11.so."*             "$APPROOT/_internal/libX11-xcb.so."*             "$APPROOT/_internal/libXau.so."*             "$APPROOT/_internal/libXdmcp.so."*             "$APPROOT/_internal/libXext.so."*             "$APPROOT/_internal/libxcb.so."*             "$APPROOT/_internal/libxcb-"*".so."*             "$APPROOT/_internal/libxkbcommon.so."*             "$APPROOT/_internal/libxkbcommon-x11.so."*             "$APPROOT/_internal/libwayland-"*".so."*
 
           cat > AppDir/Breakeven_Tray.desktop << 'EOF'
           [Desktop Entry]
@@ -90,11 +108,20 @@ jobs:
 
           cat > AppDir/AppRun << 'EOF'
           #!/bin/sh
+          set -eu
           HERE="$(dirname "$(readlink -f "$0")")"
           APPROOT="$HERE/usr/lib/Breakeven_Tray"
-          export QT_PLUGIN_PATH="$APPROOT/_internal/PyQt5/Qt5/plugins:$APPROOT/_internal/PyQt5/Qt/plugins${QT_PLUGIN_PATH:+:$QT_PLUGIN_PATH}"
-          export QT_QPA_PLATFORM_PLUGIN_PATH="$APPROOT/_internal/PyQt5/Qt5/plugins/platforms"
-          export LD_LIBRARY_PATH="$APPROOT/_internal:$APPROOT/_internal/PyQt5/Qt5/lib:$APPROOT/_internal/PyQt5/Qt/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+          QT_PLUGIN_PRIMARY="$APPROOT/_internal/PyQt5/Qt5/plugins"
+          QT_PLUGIN_FALLBACK="$APPROOT/_internal/PyQt5/Qt/plugins"
+          QT_LIB_PRIMARY="$APPROOT/_internal/PyQt5/Qt5/lib"
+          QT_LIB_FALLBACK="$APPROOT/_internal/PyQt5/Qt/lib"
+          QT_COMPAT_LIBS="$APPROOT/qt-host-libs"
+          export QT_PLUGIN_PATH="$QT_PLUGIN_PRIMARY:$QT_PLUGIN_FALLBACK${QT_PLUGIN_PATH:+:$QT_PLUGIN_PATH}"
+          export QT_QPA_PLATFORM_PLUGIN_PATH="$QT_PLUGIN_PRIMARY/platforms"
+          export LD_LIBRARY_PATH="$QT_LIB_PRIMARY:$QT_LIB_FALLBACK:$QT_COMPAT_LIBS${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+          if [ "${BREAKEVEN_QT_DEBUG_PLUGINS:-0}" = "1" ]; then
+            export QT_DEBUG_PLUGINS=1
+          fi
           exec "$APPROOT/Breakeven_Tray" "$@"
           EOF
           chmod +x AppDir/AppRun
