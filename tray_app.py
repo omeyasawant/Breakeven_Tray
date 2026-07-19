@@ -3,6 +3,7 @@
 import sys
 import os
 import json
+import faulthandler
 import logging
 import platform
 import re
@@ -19,6 +20,167 @@ from urllib.parse import urljoin
 
 import psutil
 import requests
+
+
+def _bootstrap_first_existing_dir(paths: List[str]) -> str:
+    seen = set()
+    for candidate in paths:
+        normalized = os.path.normpath(candidate)
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        if os.path.isdir(normalized):
+            return normalized
+    return ""
+
+
+def _bootstrap_existing_dirs(paths: List[str]) -> List[str]:
+    seen = set()
+    matches: List[str] = []
+    for candidate in paths:
+        normalized = os.path.normpath(candidate)
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        if os.path.isdir(normalized):
+            matches.append(normalized)
+    return matches
+
+
+def _bootstrap_configure_linux_qt_runtime() -> None:
+    if platform.system().lower() != "linux":
+        return
+
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    bundle_dir = getattr(sys, "_MEIPASS", script_dir)
+    runtime_dir = script_dir
+
+    argv0 = sys.argv[0] if sys.argv else ""
+    if argv0:
+        candidate_dir = os.path.dirname(os.path.abspath(argv0))
+        if os.path.isdir(candidate_dir):
+            runtime_dir = candidate_dir
+    elif getattr(sys, "frozen", False):
+        candidate_dir = os.path.dirname(os.path.abspath(sys.executable))
+        if os.path.isdir(candidate_dir):
+            runtime_dir = candidate_dir
+
+    runtime_roots = [bundle_dir, script_dir, runtime_dir, os.getcwd()]
+    if getattr(sys, "frozen", False):
+        exe_dir = os.path.dirname(os.path.abspath(sys.executable))
+        runtime_roots.extend([exe_dir, os.path.join(exe_dir, "_internal")])
+    runtime_roots.extend([os.path.join(root, "_internal") for root in list(runtime_roots)])
+
+    qt_layouts: List[Tuple[str, str]] = []
+    compat_library_roots: List[str] = []
+    for root in runtime_roots:
+        qt_layouts.extend([
+            (
+                os.path.join(root, "PyQt5", "Qt5", "plugins"),
+                os.path.join(root, "PyQt5", "Qt5", "lib"),
+            ),
+            (
+                os.path.join(root, "PyQt5", "Qt", "plugins"),
+                os.path.join(root, "PyQt5", "Qt", "lib"),
+            ),
+            (
+                os.path.join(root, "qt5_plugins"),
+                os.path.join(root, "qt5_libs"),
+            ),
+            (
+                os.path.join(root, "_internal", "PyQt5", "Qt5", "plugins"),
+                os.path.join(root, "_internal", "PyQt5", "Qt5", "lib"),
+            ),
+            (
+                os.path.join(root, "_internal", "PyQt5", "Qt", "plugins"),
+                os.path.join(root, "_internal", "PyQt5", "Qt", "lib"),
+            ),
+        ])
+        compat_library_roots.extend([
+            os.path.join(root, "qt-host-libs"),
+            os.path.join(root, "_internal", "qt-host-libs"),
+        ])
+
+    selected_plugin_root = ""
+    selected_qt_library_root = ""
+    for plugin_root, library_root in qt_layouts:
+        if os.path.isdir(plugin_root) and os.path.isdir(library_root):
+            selected_plugin_root = os.path.normpath(plugin_root)
+            selected_qt_library_root = os.path.normpath(library_root)
+            break
+
+    if not selected_plugin_root:
+        selected_plugin_root = _bootstrap_first_existing_dir(
+            [plugin_root for plugin_root, _ in qt_layouts]
+        )
+
+    if not selected_qt_library_root and selected_plugin_root:
+        sibling_library_root = os.path.normpath(
+            os.path.join(os.path.dirname(selected_plugin_root), "lib")
+        )
+        if os.path.isdir(sibling_library_root):
+            selected_qt_library_root = sibling_library_root
+
+    allowed_library_roots: List[str] = []
+    if selected_qt_library_root and os.path.isdir(selected_qt_library_root):
+        allowed_library_roots.append(selected_qt_library_root)
+    allowed_library_roots.extend(_bootstrap_existing_dirs(compat_library_roots))
+
+    if allowed_library_roots:
+        os.environ["LD_LIBRARY_PATH"] = os.pathsep.join(allowed_library_roots)
+    else:
+        os.environ.pop("LD_LIBRARY_PATH", None)
+
+    if selected_plugin_root:
+        os.environ["QT_PLUGIN_PATH"] = selected_plugin_root
+        platform_plugin_dir = os.path.join(selected_plugin_root, "platforms")
+        if os.path.isdir(platform_plugin_dir):
+            os.environ["QT_QPA_PLATFORM_PLUGIN_PATH"] = platform_plugin_dir
+
+    display = str(os.environ.get("DISPLAY") or "").strip()
+    wayland_display = str(os.environ.get("WAYLAND_DISPLAY") or "").strip()
+    xdg_session_type = str(os.environ.get("XDG_SESSION_TYPE") or "").strip().lower()
+
+    if display and xdg_session_type != "wayland":
+        os.environ.setdefault("QT_QPA_PLATFORM", "xcb")
+    elif wayland_display and xdg_session_type == "wayland":
+        os.environ.setdefault("QT_QPA_PLATFORM", "wayland")
+
+    os.environ.pop("QT_QPA_PLATFORMTHEME", None)
+    os.environ.setdefault("QT_STYLE_OVERRIDE", "Fusion")
+    os.environ.setdefault("QT_AUTO_SCREEN_SCALE_FACTOR", "1")
+    os.environ.setdefault("QT_X11_NO_MITSHM", "1")
+    if str(os.environ.get("BREAKEVEN_QT_DEBUG_PLUGINS") or "").strip() == "1":
+        os.environ["QT_DEBUG_PLUGINS"] = "1"
+
+
+_bootstrap_configure_linux_qt_runtime()
+
+
+def _enable_early_crash_diagnostics() -> None:
+    if str(os.environ.get("BREAKEVEN_DISABLE_FAULTHANDLER") or "").strip() == "1":
+        return
+
+    try:
+        faulthandler.enable(all_threads=True)
+    except Exception as exc:
+        print(f"[CRASH] Unable to enable faulthandler: {exc}", file=sys.stderr, flush=True)
+        return
+
+    for signal_name in ("SIGUSR1", "SIGUSR2"):
+        debug_signal = getattr(signal, signal_name, None)
+        if debug_signal is None:
+            continue
+        try:
+            faulthandler.register(debug_signal, all_threads=True, chain=False)
+        except Exception:
+            continue
+
+    print("[CRASH] faulthandler enabled", file=sys.stderr, flush=True)
+
+
+_enable_early_crash_diagnostics()
+
 from PyQt5 import QtWidgets, QtGui, QtCore
 from PyQt5.QtWidgets import QSystemTrayIcon, QMenu, QApplication
 

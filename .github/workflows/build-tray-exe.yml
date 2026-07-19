@@ -109,8 +109,49 @@ jobs:
           cat > AppDir/AppRun << 'EOF'
           #!/bin/sh
           set -eu
+
+          sanitize_path_list() {
+            VAR_NAME="$1"
+            shift
+            CURRENT_VALUE="$(printenv "$VAR_NAME" 2>/dev/null || true)"
+            if [ -z "$CURRENT_VALUE" ]; then
+              return 0
+            fi
+
+            SANITIZED_VALUE=""
+            OLD_IFS="$IFS"
+            IFS=':'
+            for ENTRY in $CURRENT_VALUE; do
+              [ -n "$ENTRY" ] || continue
+              SKIP_ENTRY=0
+              for BLOCKED_PREFIX in "$@"; do
+                case "$ENTRY" in
+                  "$BLOCKED_PREFIX"|"$BLOCKED_PREFIX"/*)
+                    SKIP_ENTRY=1
+                    break
+                    ;;
+                esac
+              done
+              if [ "$SKIP_ENTRY" -eq 0 ]; then
+                if [ -n "$SANITIZED_VALUE" ]; then
+                  SANITIZED_VALUE="$SANITIZED_VALUE:$ENTRY"
+                else
+                  SANITIZED_VALUE="$ENTRY"
+                fi
+              fi
+            done
+            IFS="$OLD_IFS"
+
+            if [ -n "$SANITIZED_VALUE" ]; then
+              export "$VAR_NAME=$SANITIZED_VALUE"
+            else
+              unset "$VAR_NAME"
+            fi
+          }
+
           HERE="$(dirname "$(readlink -f "$0")")"
           APPROOT="$HERE/usr/lib/Breakeven_Tray"
+          APPROOT_INTERNAL="$APPROOT/_internal"
           QT_PLUGIN_PRIMARY="$APPROOT/_internal/PyQt5/Qt5/plugins"
           QT_PLUGIN_FALLBACK="$APPROOT/_internal/PyQt5/Qt/plugins"
           QT_LIB_PRIMARY="$APPROOT/_internal/PyQt5/Qt5/lib"
@@ -123,9 +164,18 @@ jobs:
             QT_PLUGIN_ROOT="$QT_PLUGIN_FALLBACK"
             QT_LIB_ROOT="$QT_LIB_FALLBACK"
           fi
+
+          sanitize_path_list LD_LIBRARY_PATH "$APPROOT" "$APPROOT_INTERNAL"
+          sanitize_path_list QT_PLUGIN_PATH "$APPROOT" "$APPROOT_INTERNAL"
+          sanitize_path_list QT_QPA_PLATFORM_PLUGIN_PATH "$APPROOT" "$APPROOT_INTERNAL"
+          unset QT_QPA_PLATFORMTHEME
+          unset LD_PRELOAD
+          unset PYTHONHOME
+
           export QT_PLUGIN_PATH="$QT_PLUGIN_ROOT"
           export QT_QPA_PLATFORM_PLUGIN_PATH="$QT_PLUGIN_ROOT/platforms"
           export LD_LIBRARY_PATH="$QT_LIB_ROOT:$QT_COMPAT_LIBS"
+          export PYTHONFAULTHANDLER=1
           if [ "${BREAKEVEN_QT_DEBUG_PLUGINS:-0}" = "1" ]; then
             export QT_DEBUG_PLUGINS=1
           fi
