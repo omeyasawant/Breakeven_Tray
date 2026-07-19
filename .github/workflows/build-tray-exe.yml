@@ -116,9 +116,16 @@ jobs:
           QT_LIB_PRIMARY="$APPROOT/_internal/PyQt5/Qt5/lib"
           QT_LIB_FALLBACK="$APPROOT/_internal/PyQt5/Qt/lib"
           QT_COMPAT_LIBS="$APPROOT/qt-host-libs"
-          export QT_PLUGIN_PATH="$QT_PLUGIN_PRIMARY:$QT_PLUGIN_FALLBACK${QT_PLUGIN_PATH:+:$QT_PLUGIN_PATH}"
-          export QT_QPA_PLATFORM_PLUGIN_PATH="$QT_PLUGIN_PRIMARY/platforms"
-          export LD_LIBRARY_PATH="$QT_LIB_PRIMARY:$QT_LIB_FALLBACK:$QT_COMPAT_LIBS${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+          if [ -d "$QT_PLUGIN_PRIMARY" ] && [ -d "$QT_LIB_PRIMARY" ]; then
+            QT_PLUGIN_ROOT="$QT_PLUGIN_PRIMARY"
+            QT_LIB_ROOT="$QT_LIB_PRIMARY"
+          else
+            QT_PLUGIN_ROOT="$QT_PLUGIN_FALLBACK"
+            QT_LIB_ROOT="$QT_LIB_FALLBACK"
+          fi
+          export QT_PLUGIN_PATH="$QT_PLUGIN_ROOT${QT_PLUGIN_PATH:+:$QT_PLUGIN_PATH}"
+          export QT_QPA_PLATFORM_PLUGIN_PATH="$QT_PLUGIN_ROOT/platforms"
+          export LD_LIBRARY_PATH="$QT_LIB_ROOT:$QT_COMPAT_LIBS${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
           if [ "${BREAKEVEN_QT_DEBUG_PLUGINS:-0}" = "1" ]; then
             export QT_DEBUG_PLUGINS=1
           fi
