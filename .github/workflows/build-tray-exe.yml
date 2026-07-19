@@ -123,9 +123,9 @@ jobs:
             QT_PLUGIN_ROOT="$QT_PLUGIN_FALLBACK"
             QT_LIB_ROOT="$QT_LIB_FALLBACK"
           fi
-          export QT_PLUGIN_PATH="$QT_PLUGIN_ROOT${QT_PLUGIN_PATH:+:$QT_PLUGIN_PATH}"
+          export QT_PLUGIN_PATH="$QT_PLUGIN_ROOT"
           export QT_QPA_PLATFORM_PLUGIN_PATH="$QT_PLUGIN_ROOT/platforms"
-          export LD_LIBRARY_PATH="$QT_LIB_ROOT:$QT_COMPAT_LIBS${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+          export LD_LIBRARY_PATH="$QT_LIB_ROOT:$QT_COMPAT_LIBS"
           if [ "${BREAKEVEN_QT_DEBUG_PLUGINS:-0}" = "1" ]; then
             export QT_DEBUG_PLUGINS=1
           fi

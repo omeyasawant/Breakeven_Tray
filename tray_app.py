@@ -292,31 +292,15 @@ def configure_linux_qt_runtime() -> None:
             os.path.join(root, "_internal"),
         ])
 
-    current_library_path = [
-        part for part in os.environ.get("LD_LIBRARY_PATH", "").split(os.pathsep) if part
-    ]
-    allowed_library_root_set = {
-        os.path.normcase(os.path.normpath(path)) for path in allowed_library_roots
-    }
-    disallowed_runtime_root_set = {
-        os.path.normcase(os.path.normpath(path)) for path in disallowed_runtime_roots
-    }
-    sanitized_library_path: List[str] = []
-    seen_library_paths = set()
+    inherited_library_path = os.environ.get("LD_LIBRARY_PATH", "")
 
-    for part in current_library_path:
-        normalized_part = os.path.normcase(os.path.normpath(part))
-        if normalized_part in seen_library_paths:
-            continue
-        if normalized_part in disallowed_runtime_root_set and normalized_part not in allowed_library_root_set:
-            continue
-        seen_library_paths.add(normalized_part)
-        sanitized_library_path.append(part)
-
-    set_env_path("LD_LIBRARY_PATH", allowed_library_roots + sanitized_library_path)
+    if allowed_library_roots:
+        os.environ["LD_LIBRARY_PATH"] = os.pathsep.join(allowed_library_roots)
+    else:
+        os.environ.pop("LD_LIBRARY_PATH", None)
 
     if selected_plugin_root:
-        set_env_path("QT_PLUGIN_PATH", [selected_plugin_root])
+        os.environ["QT_PLUGIN_PATH"] = selected_plugin_root
 
     platform_plugin_dir = ""
     if selected_plugin_root:
@@ -352,6 +336,7 @@ def configure_linux_qt_runtime() -> None:
     )
     log_info(f"[QT] Selected plugin root={selected_plugin_root}")
     log_info(f"[QT] Selected library root={selected_qt_library_root}")
+    log_info(f"[QT] Inherited LD_LIBRARY_PATH={inherited_library_path}")
     log_info(f"[QT] LD_LIBRARY_PATH={os.environ.get('LD_LIBRARY_PATH', '')}")
 
 
@@ -1804,12 +1789,18 @@ def main():
             if not linux_graphical_session_available():
                 sys.exit(run_headless_service_loop("No graphical Linux session detected; skipping Qt tray UI"))
 
+        log_info("[QT] Creating QApplication")
         app = QApplication(sys.argv)
+        log_info("[QT] QApplication created")
         app.setQuitOnLastWindowClosed(False)
+        log_info("[QT] Checking system tray availability")
         if not QSystemTrayIcon.isSystemTrayAvailable():
             sys.exit(run_headless_service_loop("System tray is unavailable in this Linux session; skipping Qt tray UI"))
+        log_info("[QT] System tray is available")
         icon = QtGui.QIcon(ICON_PATH)
+        log_info("[QT] Creating tray icon")
         tray_icon = TrayApp(icon)
+        log_info("[QT] Showing tray icon")
         tray_icon.show()
         log_info("tray_app is ready")
         print("tray_app is ready", flush=True)
