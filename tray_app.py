@@ -10,6 +10,7 @@ import re
 import socket
 import stat
 import subprocess
+import shutil
 import tempfile
 import threading
 import time
@@ -927,6 +928,22 @@ class BackendController:
                 return candidate
         return None
 
+    def resolve_linux_dashboard_launch_command(self, dashboard_dir: str) -> Optional[str]:
+        command_candidates = [
+            shutil.which("breakevendashboard"),
+            shutil.which("breakeven"),
+            os.path.join(dashboard_dir, "BreakEven"),
+            "/usr/bin/breakevendashboard",
+            "/usr/bin/breakeven",
+            "/usr/local/bin/breakevendashboard",
+            "/usr/local/bin/breakeven",
+            "/opt/BreakEven/breakeven",
+        ]
+        for candidate in command_candidates:
+            if candidate and os.path.exists(candidate):
+                return candidate
+        return None
+
     def find_dashboard_processes(self, launch_target: Optional[str]) -> List[psutil.Process]:
         matches: List[psutil.Process] = []
         seen_pids = set()
@@ -1332,6 +1349,7 @@ class BackendController:
         if not install_path:
             raise RuntimeError("installPath missing in client_config.json")
 
+        dashboard_dir = os.path.join(install_path, "dashboard_gui")
         launch_target = self.resolve_dashboard_candidate(install_path)
         if not launch_target:
             raise RuntimeError("No dashboard build found in installPath/dashboard_gui")
@@ -1355,6 +1373,16 @@ class BackendController:
                     shell=False,
                 )
                 return
+
+            installed_launch = self.resolve_linux_dashboard_launch_command(dashboard_dir)
+            if installed_launch:
+                self._dashboard_handle = subprocess.Popen(
+                    [installed_launch],
+                    cwd=os.path.dirname(installed_launch) or dashboard_dir,
+                    shell=False,
+                )
+                return
+
             subprocess.Popen(["xdg-open", launch_target], shell=False)
             return
 
