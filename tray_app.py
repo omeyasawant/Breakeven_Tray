@@ -7,6 +7,7 @@ import faulthandler
 import logging
 import platform
 import re
+import socket
 import stat
 import subprocess
 import tempfile
@@ -502,6 +503,68 @@ def configure_linux_qt_runtime() -> None:
     log_info(f"[QT] LD_LIBRARY_PATH={os.environ.get('LD_LIBRARY_PATH', '')}")
 
 
+def _local_x11_socket_available(display: str) -> bool:
+    value = str(display or "").strip()
+    if not value:
+        return False
+
+    if value.startswith("unix/"):
+        value = value.split("/", 1)[1]
+
+    if ":" not in value:
+        return False
+
+    host_part, display_part = value.rsplit(":", 1)
+    if host_part and host_part not in {"localhost", "127.0.0.1", "::1"}:
+        return False
+
+    display_number = display_part.split(".", 1)[0]
+    if not display_number.isdigit():
+        return False
+
+    socket_path = f"/tmp/.X11-unix/X{display_number}"
+    if not stat.S_ISSOCK(os.stat(socket_path).st_mode):
+        return False
+
+    try:
+        probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        probe.settimeout(0.2)
+        probe.connect(socket_path)
+        probe.close()
+        return True
+    except OSError:
+        return False
+
+
+def _local_wayland_socket_available(runtime_dir: str, wayland_display: str) -> bool:
+    runtime_dir = str(runtime_dir or "").strip()
+    wayland_display = str(wayland_display or "").strip()
+    if not runtime_dir or not wayland_display:
+        return False
+
+    socket_path = os.path.join(runtime_dir, wayland_display)
+    try:
+        return stat.S_ISSOCK(os.stat(socket_path).st_mode)
+    except OSError:
+        return False
+
+
+def _session_dbus_available(runtime_dir: str) -> bool:
+    dbus_session_address = str(os.environ.get("DBUS_SESSION_BUS_ADDRESS") or "").strip()
+    if dbus_session_address:
+        return True
+
+    runtime_dir = str(runtime_dir or "").strip()
+    if not runtime_dir:
+        return False
+
+    bus_path = os.path.join(runtime_dir, "bus")
+    try:
+        return stat.S_ISSOCK(os.stat(bus_path).st_mode)
+    except OSError:
+        return False
+
+
 def linux_graphical_session_available() -> bool:
     if get_os_type() != "linux":
         return True
@@ -515,11 +578,30 @@ def linux_graphical_session_available() -> bool:
     display = str(os.environ.get("DISPLAY") or "").strip()
     wayland_display = str(os.environ.get("WAYLAND_DISPLAY") or "").strip()
     xdg_session_type = str(os.environ.get("XDG_SESSION_TYPE") or "").strip().lower()
+    xdg_runtime_dir = str(os.environ.get("XDG_RUNTIME_DIR") or "").strip()
 
-    if display or wayland_display:
-        return True
+    session_bus_available = _session_dbus_available(xdg_runtime_dir)
+    if not session_bus_available:
+        log_info("[HEADLESS] No session DBus is available for the tray process")
 
-    return xdg_session_type in {"x11", "wayland"}
+    if wayland_display and xdg_session_type == "wayland":
+        wayland_ready = _local_wayland_socket_available(xdg_runtime_dir, wayland_display)
+        if not wayland_ready:
+            log_info(
+                f"[HEADLESS] Wayland socket is unavailable: runtime_dir={xdg_runtime_dir} wayland_display={wayland_display}"
+            )
+        return wayland_ready and session_bus_available
+
+    if display:
+        x11_ready = _local_x11_socket_available(display)
+        if not x11_ready:
+            log_info(f"[HEADLESS] X11 display socket is unavailable: DISPLAY={display}")
+        return x11_ready and session_bus_available
+
+    if xdg_session_type in {"x11", "wayland"}:
+        log_info(f"[HEADLESS] Session type {xdg_session_type} is present without a usable display socket")
+
+    return False
 
 
 def run_headless_service_loop(reason: str) -> int:
