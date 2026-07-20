@@ -2027,15 +2027,22 @@ class TrayApp(QtWidgets.QSystemTrayIcon):
 
 
 def main():
+    probe_mode = "--qt-probe" in sys.argv
+    qt_args = [arg for arg in sys.argv if arg != "--qt-probe"]
+
     try:
         if get_os_type() == "linux":
             configure_linux_qt_runtime()
-            if not linux_graphical_session_available():
+            if not probe_mode and not linux_graphical_session_available():
                 sys.exit(run_headless_service_loop("No graphical Linux session detected; skipping Qt tray UI"))
 
         log_info("[QT] Creating QApplication")
-        app = QApplication(sys.argv)
+        app = QApplication(qt_args)
         log_info("[QT] QApplication created")
+        if probe_mode:
+            log_info("[QT] Probe mode succeeded")
+            print("qt probe ok", flush=True)
+            sys.exit(0)
         app.setQuitOnLastWindowClosed(False)
         log_info("[QT] Checking system tray availability")
         if not QSystemTrayIcon.isSystemTrayAvailable():

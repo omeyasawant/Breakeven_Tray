@@ -92,8 +92,6 @@ jobs:
             fi
           done
 
-          rm -f             "$APPROOT/_internal/libX11.so."*             "$APPROOT/_internal/libX11-xcb.so."*             "$APPROOT/_internal/libXau.so."*             "$APPROOT/_internal/libXdmcp.so."*             "$APPROOT/_internal/libXext.so."*             "$APPROOT/_internal/libxcb.so."*             "$APPROOT/_internal/libxcb-"*".so."*             "$APPROOT/_internal/libxkbcommon.so."*             "$APPROOT/_internal/libxkbcommon-x11.so."*             "$APPROOT/_internal/libwayland-"*".so."*
-
           cat > AppDir/Breakeven_Tray.desktop << 'EOF'
           [Desktop Entry]
           Type=Application
