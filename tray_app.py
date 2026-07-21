@@ -269,6 +269,7 @@ MANIFEST_NAME = "sudo_manifest.json"
 DOWNLOAD_BASE_DEFAULT = "https://data.breakeventx.com:64444/content-cache/updates"
 MANIFEST_URL_DEFAULT = f"{DOWNLOAD_BASE_DEFAULT}/{MANIFEST_NAME}"
 UPDATE_REFRESH_SECONDS = 15 * 60
+RELAUNCH_REQUEST_POLL_MS = 3000
 
 SLAVE_SERVICE_FALLBACK = {
     "windows": "BreakEvenSlave",
@@ -294,6 +295,11 @@ SLAVE_PROC_TOKENS = [
 
 def compact_process_text(value: str) -> str:
     return re.sub(r"[^a-z0-9]", "", (value or "").lower())
+
+
+def get_dashboard_relaunch_request_path(config: dict) -> str:
+    base_root = config.get("serviceInstallPath") or config.get("installPath") or RUNTIME_DIR
+    return os.path.join(base_root, "updater_runtime", "dashboard_relaunch_request.json")
 
 
 def setup_logger() -> logging.Logger:
@@ -711,6 +717,36 @@ class BackendController:
         if not isinstance(config, dict):
             raise RuntimeError(f"Unable to read client config at {self._config_path}")
         return config
+
+    def consume_dashboard_relaunch_request(self) -> bool:
+        config = self.load_config()
+        request_path = get_dashboard_relaunch_request_path(config)
+        if not os.path.exists(request_path):
+            return False
+
+        try:
+            with open(request_path, "r", encoding="utf-8") as f:
+                request_payload = json.load(f)
+        except Exception as exc:
+            log_error(f"Failed reading dashboard relaunch request {request_path}: {exc}")
+            try:
+                os.remove(request_path)
+            except Exception:
+                pass
+            return False
+
+        requested_at = request_payload.get("requested_at") or "unknown"
+        if self.is_dashboard_running():
+            log_info(
+                f"Dashboard relaunch request from {requested_at} found, but dashboard is already running; clearing request"
+            )
+            os.remove(request_path)
+            return True
+
+        log_info(f"Dashboard relaunch request from {requested_at} detected; opening dashboard from tray session")
+        self.open_dashboard()
+        os.remove(request_path)
+        return True
 
     def service_manifest_paths(self, config: dict) -> List[str]:
         service_install_path = config.get("serviceInstallPath") or config.get("installPath")
@@ -1835,9 +1871,15 @@ class TrayApp(QtWidgets.QSystemTrayIcon):
         self.refresh_timer.timeout.connect(self.refresh_state_async)
         self.refresh_timer.start()
 
+        self.dashboard_request_timer = QtCore.QTimer()
+        self.dashboard_request_timer.setInterval(RELAUNCH_REQUEST_POLL_MS)
+        self.dashboard_request_timer.timeout.connect(self.process_dashboard_relaunch_request)
+        self.dashboard_request_timer.start()
+
         self._refresh_in_flight = False
         self._action_in_flight = False
         self.refresh_state_async()
+        QtCore.QTimer.singleShot(1000, self.process_dashboard_relaunch_request)
 
     def icon_activated(self, reason):
         if reason == QSystemTrayIcon.Trigger:
@@ -1910,6 +1952,20 @@ class TrayApp(QtWidgets.QSystemTrayIcon):
                 self._refresh_in_flight = False
 
         threading.Thread(target=worker, daemon=True).start()
+
+    def process_dashboard_relaunch_request(self):
+        try:
+            if not self.backend.consume_dashboard_relaunch_request():
+                return
+        except Exception as exc:
+            log_error(f"Dashboard relaunch request handling failed: {exc}")
+            return
+
+        try:
+            self.backend.refresh_dashboard_state()
+        except Exception as exc:
+            log_error(f"Dashboard refresh after relaunch request failed: {exc}")
+        self.refresh_menu_state()
 
     def run_action_async(self, action, error_prefix: str, post_action_refresh=None):
         if self._action_in_flight:
