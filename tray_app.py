@@ -298,8 +298,23 @@ def compact_process_text(value: str) -> str:
 
 
 def get_dashboard_relaunch_request_path(config: dict) -> str:
-    base_root = config.get("serviceInstallPath") or config.get("installPath") or RUNTIME_DIR
+    base_root = config.get("installPath") or config.get("serviceInstallPath") or RUNTIME_DIR
     return os.path.join(base_root, "updater_runtime", "dashboard_relaunch_request.json")
+
+
+def get_dashboard_relaunch_request_candidates(config: dict) -> List[str]:
+    candidates: List[str] = []
+    for base_root in [
+        config.get("installPath"),
+        config.get("serviceInstallPath"),
+        RUNTIME_DIR,
+    ]:
+        if not base_root:
+            continue
+        candidate = os.path.join(base_root, "updater_runtime", "dashboard_relaunch_request.json")
+        if candidate not in candidates:
+            candidates.append(candidate)
+    return candidates
 
 
 def setup_logger() -> logging.Logger:
@@ -718,10 +733,28 @@ class BackendController:
             raise RuntimeError(f"Unable to read client config at {self._config_path}")
         return config
 
+    def clear_dashboard_relaunch_requests(self, config: Optional[dict] = None) -> int:
+        config = config or self.load_config()
+        cleared = 0
+        for request_path in get_dashboard_relaunch_request_candidates(config):
+            if not os.path.exists(request_path):
+                continue
+            try:
+                os.remove(request_path)
+                cleared += 1
+                log_info(f"Cleared dashboard relaunch request: {request_path}")
+            except Exception as exc:
+                log_error(f"Failed clearing dashboard relaunch request {request_path}: {exc}")
+        return cleared
+
     def consume_dashboard_relaunch_request(self) -> bool:
         config = self.load_config()
-        request_path = get_dashboard_relaunch_request_path(config)
-        if not os.path.exists(request_path):
+        request_path = None
+        for candidate in get_dashboard_relaunch_request_candidates(config):
+            if os.path.exists(candidate):
+                request_path = candidate
+                break
+        if not request_path:
             return False
 
         try:
@@ -740,12 +773,12 @@ class BackendController:
             log_info(
                 f"Dashboard relaunch request from {requested_at} found, but dashboard is already running; clearing request"
             )
-            os.remove(request_path)
+            self.clear_dashboard_relaunch_requests(config=config)
             return True
 
+        self.clear_dashboard_relaunch_requests(config=config)
         log_info(f"Dashboard relaunch request from {requested_at} detected; opening dashboard from tray session")
         self.open_dashboard()
-        os.remove(request_path)
         return True
 
     def service_manifest_paths(self, config: dict) -> List[str]:
@@ -1428,6 +1461,13 @@ class BackendController:
         log_info("close_dashboard invoked")
         terminated = False
         os_type = get_os_type()
+        try:
+            config = self.load_config()
+        except Exception:
+            config = None
+        if config is not None:
+            self.clear_dashboard_relaunch_requests(config=config)
+
         if os_type == "windows":
             try:
                 direct_kill = subprocess.run(
@@ -1466,8 +1506,7 @@ class BackendController:
             self._dashboard_handle = None
 
         try:
-            config = self.load_config()
-            launch_target = self.resolve_dashboard_candidate(config.get("installPath", ""))
+            launch_target = self.resolve_dashboard_candidate((config or {}).get("installPath", ""))
         except Exception:
             launch_target = None
 
