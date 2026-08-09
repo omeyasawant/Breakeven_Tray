@@ -25,7 +25,7 @@ jobs:
 
           - os: macos-15-intel
             artifact_suffix: macos
-            upload_path: dist/Breakeven_Tray.app.zip
+            upload_path: dist/Breakeven_Tray.pkg
 
     steps:
       - name: Checkout
@@ -70,6 +70,7 @@ jobs:
           P12_PASSWORD: ${{ secrets.APPLE_BUILD_CERTIFICATE_PASSWORD }}
           KEYCHAIN_PASSWORD: ${{ secrets.APPLE_KEYCHAIN_PASSWORD }}
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_INSTALLER_SIGNING_IDENTITY: ${{ secrets.APPLE_INSTALLER_SIGNING_IDENTITY }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
@@ -77,6 +78,7 @@ jobs:
           set -euo pipefail
 
           echo "MACOS_SIGNING_ENABLED=false" >> "$GITHUB_ENV"
+          echo "MACOS_PKG_SIGNING_ENABLED=false" >> "$GITHUB_ENV"
           echo "MACOS_NOTARIZATION_ENABLED=false" >> "$GITHUB_ENV"
 
           missing=()
@@ -110,10 +112,17 @@ jobs:
           echo "MACOS_SIGNING_IDENTITY=$APPLE_SIGNING_IDENTITY" >> "$GITHUB_ENV"
           echo "MACOS_KEYCHAIN_PATH=$KEYCHAIN_PATH" >> "$GITHUB_ENV"
 
-          if [ -n "${APPLE_ID:-}" ] && [ -n "${APPLE_APP_SPECIFIC_PASSWORD:-}" ] && [ -n "${APPLE_TEAM_ID:-}" ]; then
+          if [ -n "${APPLE_INSTALLER_SIGNING_IDENTITY:-}" ]; then
+            echo "MACOS_PKG_SIGNING_ENABLED=true" >> "$GITHUB_ENV"
+            echo "MACOS_PKG_SIGNING_IDENTITY=$APPLE_INSTALLER_SIGNING_IDENTITY" >> "$GITHUB_ENV"
+          else
+            echo "::warning::APPLE_INSTALLER_SIGNING_IDENTITY is missing. The macOS .pkg will be built unsigned."
+          fi
+
+          if [ -n "${APPLE_ID:-}" ] && [ -n "${APPLE_APP_SPECIFIC_PASSWORD:-}" ] && [ -n "${APPLE_TEAM_ID:-}" ] && [ -n "${APPLE_INSTALLER_SIGNING_IDENTITY:-}" ]; then
             echo "MACOS_NOTARIZATION_ENABLED=true" >> "$GITHUB_ENV"
           else
-            echo "::warning::Apple notarization secrets missing (APPLE_ID, APPLE_APP_SPECIFIC_PASSWORD, or APPLE_TEAM_ID). App will be Developer ID signed but not notarized."
+            echo "::warning::Apple notarization secrets or APPLE_INSTALLER_SIGNING_IDENTITY are missing. The macOS .pkg will not be notarized."
           fi
 
       - name: Install Linux Qt runtime helpers
@@ -129,7 +138,7 @@ jobs:
         run: |
           python -m PyInstaller --onefile --windowed tray_app.py             --name Breakeven_Tray             --add-data "icon.png;."             --hidden-import psutil             --hidden-import requests             --hidden-import packaging             --hidden-import PyQt5
 
-      - name: Build (macOS .app zip)
+      - name: Build (macOS .pkg)
         if: runner.os == 'macOS'
         shell: bash -l {0}
         run: |
@@ -166,9 +175,16 @@ jobs:
 
           python -m PyInstaller --onedir --windowed tray_app.py             --name Breakeven_Tray             --add-data "icon.png:."             --hidden-import psutil             --hidden-import requests             --hidden-import packaging             --hidden-import PyQt5             "${PYINSTALLER_MAC_ARGS[@]}"
 
-          ditto -c -k --sequesterRsrc --keepParent "dist/Breakeven_Tray.app" "dist/Breakeven_Tray.app.zip"
+          PACKAGE_VERSION="${BREAKEVEN_PKG_VERSION:-1.0.0}"
 
-      - name: Notarize macOS app bundle
+          if [ "${MACOS_PKG_SIGNING_ENABLED:-false}" = "true" ]; then
+            pkgbuild               --component "dist/Breakeven_Tray.app"               --install-location "/Applications"               --identifier "com.breakeven.tray.pkg"               --version "$PACKAGE_VERSION"               --sign "$MACOS_PKG_SIGNING_IDENTITY"               "dist/Breakeven_Tray.pkg"
+          else
+            echo "::warning::Building Breakeven_Tray.pkg without Developer ID Installer signing."
+            pkgbuild               --component "dist/Breakeven_Tray.app"               --install-location "/Applications"               --identifier "com.breakeven.tray.pkg"               --version "$PACKAGE_VERSION"               "dist/Breakeven_Tray.pkg"
+          fi
+
+      - name: Notarize macOS package
         if: runner.os == 'macOS'
         shell: bash -l {0}
         env:
@@ -177,14 +193,13 @@ jobs:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
           if [ "${MACOS_NOTARIZATION_ENABLED:-false}" != "true" ]; then
-            echo "::warning::Skipping notarization for Breakeven_Tray because Apple ID notarization secrets are unavailable."
+            echo "::warning::Skipping notarization for Breakeven_Tray.pkg because notarization prerequisites are unavailable."
             exit 0
           fi
 
-          xcrun notarytool submit "dist/Breakeven_Tray.app.zip"             --apple-id "$APPLE_ID"             --password "$APPLE_APP_SPECIFIC_PASSWORD"             --team-id "$APPLE_TEAM_ID"             --wait
+          xcrun notarytool submit "dist/Breakeven_Tray.pkg"             --apple-id "$APPLE_ID"             --password "$APPLE_APP_SPECIFIC_PASSWORD"             --team-id "$APPLE_TEAM_ID"             --wait
 
-          xcrun stapler staple "dist/Breakeven_Tray.app"
-          ditto -c -k --sequesterRsrc --keepParent "dist/Breakeven_Tray.app" "dist/Breakeven_Tray.app.zip"
+          xcrun stapler staple "dist/Breakeven_Tray.pkg"
 
       - name: Clean up macOS signing keychain
         if: runner.os == 'macOS' && always()
