@@ -329,20 +329,51 @@ def compact_process_text(value: str) -> str:
     return re.sub(r"[^a-z0-9]", "", (value or "").lower())
 
 
+def runtime_coordination_root_candidates(config: dict) -> List[str]:
+    candidates: List[str] = []
+    if get_os_type() == "macos":
+        candidates.append(os.path.join("/Users", "Shared", "BreakEvenClient"))
+
+    candidates.extend([
+        config.get("serviceInstallPath"),
+        config.get("installPath"),
+        RUNTIME_DIR,
+    ])
+
+    resolved: List[str] = []
+    seen = set()
+    for candidate in candidates:
+        if not candidate:
+            continue
+        normalized = os.path.normpath(candidate)
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        resolved.append(normalized)
+    return resolved
+
+
+def resolve_runtime_coordination_root(config: dict) -> str:
+    fallback_root = os.path.join(RUNTIME_DIR, "updater_runtime")
+    for base_root in runtime_coordination_root_candidates(config):
+        runtime_root = os.path.join(base_root, "updater_runtime")
+        try:
+            os.makedirs(runtime_root, exist_ok=True)
+            if os.access(runtime_root, os.W_OK):
+                return runtime_root
+        except Exception:
+            continue
+    return os.path.normpath(fallback_root)
+
+
 def get_dashboard_relaunch_request_path(config: dict) -> str:
-    base_root = config.get("installPath") or config.get("serviceInstallPath") or RUNTIME_DIR
-    return os.path.join(base_root, "updater_runtime", "dashboard_relaunch_request.json")
+    runtime_root = resolve_runtime_coordination_root(config)
+    return os.path.join(runtime_root, "dashboard_relaunch_request.json")
 
 
 def get_dashboard_relaunch_request_candidates(config: dict) -> List[str]:
     candidates: List[str] = []
-    for base_root in [
-        config.get("installPath"),
-        config.get("serviceInstallPath"),
-        RUNTIME_DIR,
-    ]:
-        if not base_root:
-            continue
+    for base_root in runtime_coordination_root_candidates(config):
         candidate = os.path.join(base_root, "updater_runtime", "dashboard_relaunch_request.json")
         if candidate not in candidates:
             candidates.append(candidate)
@@ -1021,12 +1052,29 @@ class BackendController:
         elif os_type == "macos":
             candidates = [
                 os.path.join(dashboard_dir, "BreakEven.app"),
-                os.path.join(dashboard_dir, "BreakEven.dmg"),
+                os.path.join(dashboard_dir, "BreakEven Dashboard.app"),
+                os.path.join(dashboard_dir, "breakevendashboard.app"),
+                os.path.join("/Applications", "BreakEven.app"),
+                os.path.join("/Applications", "BreakEven Dashboard.app"),
+                os.path.join("/Applications", "breakevendashboard.app"),
+                os.path.join(os.path.expanduser("~"), "Applications", "BreakEven.app"),
+                os.path.join(os.path.expanduser("~"), "Applications", "BreakEven Dashboard.app"),
+                os.path.join(os.path.expanduser("~"), "Applications", "breakevendashboard.app"),
             ]
 
         for candidate in candidates:
             if os.path.exists(candidate):
                 return candidate
+
+        if os_type == "macos" and os.path.isdir(dashboard_dir):
+            try:
+                for entry in os.listdir(dashboard_dir):
+                    if entry.lower().endswith(".app"):
+                        candidate = os.path.join(dashboard_dir, entry)
+                        if os.path.isdir(candidate):
+                            return candidate
+            except Exception:
+                pass
         return None
 
     def resolve_linux_dashboard_launch_command(self, dashboard_dir: str) -> Optional[str]:
