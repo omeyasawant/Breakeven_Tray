@@ -178,10 +178,10 @@ jobs:
           PACKAGE_VERSION="${BREAKEVEN_PKG_VERSION:-1.0.0}"
 
           if [ "${MACOS_PKG_SIGNING_ENABLED:-false}" = "true" ]; then
-            pkgbuild               --component "dist/Breakeven_Tray.app"               --install-location "/Applications"               --identifier "com.breakeven.tray.pkg"               --version "$PACKAGE_VERSION"               --sign "$MACOS_PKG_SIGNING_IDENTITY"               "dist/Breakeven_Tray.pkg"
+            pkgbuild               --component "dist/Breakeven_Tray.app"               --install-location "/Library/Application Support/BreakEvenClient/client_service"               --identifier "com.breakeven.tray.pkg"               --version "$PACKAGE_VERSION"               --sign "$MACOS_PKG_SIGNING_IDENTITY"               "dist/Breakeven_Tray.pkg"
           else
             echo "::warning::Building Breakeven_Tray.pkg without Developer ID Installer signing."
-            pkgbuild               --component "dist/Breakeven_Tray.app"               --install-location "/Applications"               --identifier "com.breakeven.tray.pkg"               --version "$PACKAGE_VERSION"               "dist/Breakeven_Tray.pkg"
+            pkgbuild               --component "dist/Breakeven_Tray.app"               --install-location "/Library/Application Support/BreakEvenClient/client_service"               --identifier "com.breakeven.tray.pkg"               --version "$PACKAGE_VERSION"               "dist/Breakeven_Tray.pkg"
           fi
 
       - name: Notarize macOS package
