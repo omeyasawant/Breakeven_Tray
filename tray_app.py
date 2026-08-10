@@ -261,7 +261,39 @@ ICON_PATH = first_existing_path([
     os.path.join(SCRIPT_DIR, "icon.png"),
     os.path.join(RUNTIME_DIR, "icon.png"),
 ]) or os.path.join(BUNDLE_DIR, "icon.png")
-LOG_DIR = os.path.join(RUNTIME_DIR, "logs")
+
+
+def resolve_log_dir() -> str:
+    candidates: List[str] = []
+
+    if platform.system().lower() == "darwin":
+        candidates.append(os.path.join(os.path.expanduser("~"), "Library", "Logs", "BreakEvenClient"))
+
+    config_dir = os.path.dirname(os.path.abspath(CONFIG_PATH)) if CONFIG_PATH else ""
+    if config_dir:
+        candidates.append(os.path.join(config_dir, "logs"))
+
+    candidates.append(os.path.join(os.getcwd(), "logs"))
+    candidates.append(os.path.join(RUNTIME_DIR, "logs"))
+
+    seen = set()
+    for candidate in candidates:
+        normalized = os.path.normpath(candidate)
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+
+        if os.path.isdir(normalized):
+            return normalized
+
+        parent = os.path.dirname(normalized) or normalized
+        if os.path.isdir(parent) and os.access(parent, os.W_OK):
+            return normalized
+
+    return os.path.normpath(candidates[-1])
+
+
+LOG_DIR = resolve_log_dir()
 LOG_PATH = os.path.join(LOG_DIR, "tray.log")
 
 UPDATES_INDEX_URL = "https://updates.breakeventx.com"
