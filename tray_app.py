@@ -330,15 +330,14 @@ def compact_process_text(value: str) -> str:
 
 
 def runtime_coordination_root_candidates(config: dict) -> List[str]:
-    candidates: List[str] = []
-    if get_os_type() == "macos":
-        candidates.append(os.path.join("/Users", "Shared", "BreakEvenClient"))
-
-    candidates.extend([
+    candidates: List[str] = [
         config.get("serviceInstallPath"),
         config.get("installPath"),
         RUNTIME_DIR,
-    ])
+    ]
+
+    if get_os_type() == "macos":
+        candidates.append(os.path.join("/Users", "Shared", "BreakEvenClient"))
 
     resolved: List[str] = []
     seen = set()
