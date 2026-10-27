@@ -2079,6 +2079,15 @@ class TrayApp(QtWidgets.QSystemTrayIcon):
             log_error(f"Dashboard relaunch request handling failed: {exc}")
             return
 
+        # A relaunch request is a one-shot startup handoff. Do not keep polling
+        # after it has been handled; subsequent updater cycles must not reopen
+        # the dashboard after the user closes it during this tray session.
+        if self.dashboard_request_timer.isActive():
+            self.dashboard_request_timer.stop()
+            log_info(
+                "Dashboard relaunch request handled; stopped request polling for this tray session"
+            )
+
         try:
             self.backend.refresh_dashboard_state()
         except Exception as exc:

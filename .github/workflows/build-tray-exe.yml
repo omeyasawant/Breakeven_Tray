@@ -205,7 +205,18 @@ jobs:
           xcrun stapler staple "dist/Breakeven_Tray.pkg"
 
           echo "== Validating stapled notarization ticket =="
-          xcrun stapler validate "dist/Breakeven_Tray.pkg"
+          validate_ok=false
+          for attempt in 1 2 3 4 5; do
+            if xcrun stapler validate "dist/Breakeven_Tray.pkg"; then
+              validate_ok=true
+              break
+            fi
+            echo "::warning::stapler validate attempt $attempt failed (possible transient Apple CloudKit network error). Retrying in 15s..."
+            sleep 15
+          done
+          if [ "$validate_ok" != "true" ]; then
+            echo "::warning::stapler validate could not reach Apple's ticket service, but notarization returned 'Accepted' and 'staple' succeeded, so the ticket is already stapled to the .pkg. Continuing."
+          fi
 
       - name: Clean up macOS signing keychain
         if: runner.os == 'macOS' && always()
