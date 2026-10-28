@@ -239,20 +239,27 @@ def existing_dirs(paths: List[str]) -> List[str]:
 
 
 def resolve_client_config_path() -> str:
+    # Prefer the parent (service root) client_config.json over the legacy copy
+    # beside the executable so the root config stays the single source of truth.
     search_roots = [RUNTIME_DIR, SCRIPT_DIR, os.getcwd()]
-    candidates: List[str] = []
+    parent_candidates: List[str] = []
+    local_candidates: List[str] = []
 
     for root in search_roots:
         current = os.path.abspath(root)
-        for _ in range(6):
-            candidates.append(os.path.join(current, "client_config.json"))
+        for depth in range(6):
+            candidate = os.path.join(current, "client_config.json")
+            if depth == 0:
+                local_candidates.append(candidate)
+            else:
+                parent_candidates.append(candidate)
             parent = os.path.dirname(current)
             if parent == current:
                 break
             current = parent
 
     fallback_path = os.path.join(RUNTIME_DIR, "..", "client_config.json")
-    return first_existing_path(candidates) or os.path.normpath(fallback_path)
+    return first_existing_path(parent_candidates + local_candidates) or os.path.normpath(fallback_path)
 
 
 CONFIG_PATH = resolve_client_config_path()
@@ -307,6 +314,12 @@ SLAVE_SERVICE_FALLBACK = {
     "windows": "BreakEvenSlave",
     "linux": "breakeven-slave.service",
     "macos": "com.breakeven.slave",
+}
+
+UPDATER_SERVICE_FALLBACK = {
+    "windows": "BreakEvenUpdater",
+    "linux": "breakeven-updater.service",
+    "macos": "com.breakeven.updater",
 }
 
 DASHBOARD_PROC_TOKENS = [
@@ -1901,6 +1914,69 @@ class BackendController:
             state.up_to_date = None
             return state
 
+    def update_cached_update_state(self, update_state: UpdateState) -> None:
+        with self._state_lock:
+            self._state.update_state = update_state
+
+    def trigger_updater_service(self) -> None:
+        """Start the updater service so it runs an update check immediately.
+
+        The updater service performs the real update; the tray only nudges it.
+        """
+        os_type = get_os_type()
+        service_name = UPDATER_SERVICE_FALLBACK.get(os_type)
+        if not service_name:
+            raise RuntimeError(f"Updater service trigger not supported on {os_type}")
+
+        log_info(f"[UPDATES] Triggering updater service '{service_name}' on {os_type}")
+
+        if os_type == "windows":
+            script_name = f"breakeven_start_updater_{int(time.time() * 1000)}.ps1"
+            script_path = os.path.join(tempfile.gettempdir(), script_name)
+            script_body = (
+                "$ErrorActionPreference = 'SilentlyContinue'\n"
+                f"Start-Service -Name '{service_name}'\n"
+                "Start-Sleep -Milliseconds 1200\n"
+                f"$svc = Get-Service -Name '{service_name}' -ErrorAction SilentlyContinue\n"
+                "if ($svc -and $svc.Status -eq 'Running') { exit 0 }\n"
+                "exit 1\n"
+            )
+            try:
+                with open(script_path, "w", encoding="utf-8") as handle:
+                    handle.write(script_body)
+                escaped_path = script_path.replace("'", "''")
+                elevate_cmd = (
+                    "$p = Start-Process -FilePath 'powershell.exe' -Verb RunAs -PassThru -Wait "
+                    f"-ArgumentList @('-NoLogo','-NoProfile','-ExecutionPolicy','Bypass','-File','{escaped_path}'); "
+                    "exit $p.ExitCode"
+                )
+                code, _stdout, stderr = self.run_command(
+                    ["powershell.exe", "-NoLogo", "-NoProfile", "-Command", elevate_cmd],
+                    timeout=60,
+                )
+                if code != 0:
+                    raise RuntimeError(f"Elevated updater start failed (code={code}): {stderr}")
+            finally:
+                try:
+                    if os.path.exists(script_path):
+                        os.remove(script_path)
+                except Exception:
+                    pass
+        elif os_type == "linux":
+            code, _stdout, stderr = self.run_command(
+                ["systemctl", "start", service_name], timeout=60
+            )
+            if code != 0:
+                raise RuntimeError(f"systemctl start {service_name} failed: {stderr}")
+        elif os_type == "macos":
+            code, _stdout, stderr = self.run_command(
+                ["launchctl", "kickstart", f"system/{service_name}"], timeout=60
+            )
+            if code != 0:
+                raise RuntimeError(f"launchctl kickstart {service_name} failed: {stderr}")
+
+        log_info(f"[UPDATES] Updater service '{service_name}' started")
+
     def snapshot_state(self) -> TrayState:
         log_info("[SNAPSHOT] Starting state snapshot...")
         
@@ -2024,6 +2100,7 @@ class TrayApp(QtWidgets.QSystemTrayIcon):
         log_info(f"[MENU] Slave button text set to: {slave_text}")
         self.slave_action.setEnabled(True)
 
+        self.update_action.setEnabled(not self._action_in_flight)
         if state.update_state.error:
             self.update_action.setText("⬇ Check for Updates (error)")
         elif state.update_state.up_to_date is True:
@@ -2062,6 +2139,14 @@ class TrayApp(QtWidgets.QSystemTrayIcon):
                     log_info("[WORKER] Snapshot complete, emitting signal...")
                 else:
                     log_error("[WORKER] Snapshot timeout or failed")
+
+                # Fetch update state in the background so the menu label stays
+                # current without blocking the snapshot or requiring a click.
+                try:
+                    self.backend.update_cached_update_state(self.backend.fetch_update_state())
+                except Exception as update_exc:
+                    log_error(f"[WORKER] Update state fetch failed: {update_exc}")
+
                 self.refresh_ready.emit()
             except Exception as exc:
                 log_error(f"Status refresh failed: {exc}")
@@ -2194,34 +2279,54 @@ class TrayApp(QtWidgets.QSystemTrayIcon):
 
     def check_updates(self):
         log_info("[UPDATES] Button clicked, checking for updates...")
-        self.refresh_state_async()
-        state = self.backend.get_cached_state().update_state
-        if state.error:
-            log_error(f"[UPDATES] Check failed: {state.error}")
-            self.showMessage(
-                "BreakEven Tray",
-                f"Update check failed: {state.error}",
-                QtWidgets.QSystemTrayIcon.Warning,
-                5000,
-            )
+        if self._action_in_flight:
+            log_info("[UPDATES] Ignored; another action is in flight")
             return
+        self._action_in_flight = True
+        self.update_action.setEnabled(False)
+        self.update_action.setText("⏳ Checking for Updates...")
 
-        if state.up_to_date is True:
-            message = f"Client is up to date ({state.local_version})"
-            log_info(f"[UPDATES] {message}")
-        elif state.up_to_date is False:
-            message = f"Update available: {state.latest_version}"
-            log_info(f"[UPDATES] {message}")
-        else:
-            message = "Update status unavailable"
-            log_info(f"[UPDATES] {message}")
+        def worker():
+            error_message = None
+            try:
+                state = self.backend.fetch_update_state()
+                self.backend.update_cached_update_state(state)
 
-        self.showMessage(
-            "BreakEven Tray",
-            message,
-            QtWidgets.QSystemTrayIcon.Information,
-            5000,
-        )
+                if state.error:
+                    error_message = f"Update check failed: {state.error}"
+                    log_error(f"[UPDATES] {error_message}")
+                elif state.up_to_date is True:
+                    log_info(f"[UPDATES] Client is up to date ({state.local_version})")
+                    self.showMessage(
+                        "BreakEven Tray",
+                        f"Client is up to date ({state.local_version})",
+                        QtWidgets.QSystemTrayIcon.Information,
+                        5000,
+                    )
+                elif state.up_to_date is False:
+                    log_info(f"[UPDATES] Update available: {state.latest_version}; triggering updater service")
+                    self.showMessage(
+                        "BreakEven Tray",
+                        f"Update available: {state.latest_version}. Starting update...",
+                        QtWidgets.QSystemTrayIcon.Information,
+                        5000,
+                    )
+                    self.backend.trigger_updater_service()
+                else:
+                    log_info("[UPDATES] Update status unavailable")
+                    self.showMessage(
+                        "BreakEven Tray",
+                        "Update status unavailable",
+                        QtWidgets.QSystemTrayIcon.Information,
+                        5000,
+                    )
+            except Exception as exc:
+                error_message = f"Update check failed: {exc}"
+                log_error(error_message)
+            finally:
+                self.action_complete.emit(error_message)
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def load_config(self):
         try:
