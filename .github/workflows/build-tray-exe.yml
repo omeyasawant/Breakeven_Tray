@@ -139,7 +139,7 @@ jobs:
         if: runner.os == 'Windows'
         shell: bash -l {0}
         run: |
-          python -m PyInstaller --onefile --windowed tray_app.py             --name Breakeven_Tray             --add-data "icon.png;."             --hidden-import psutil             --hidden-import requests             --hidden-import packaging             --hidden-import PyQt5
+          python -m PyInstaller --onefile --windowed tray_app.py             --name Breakeven_Tray             --icon icon.ico             --add-data "icon.png;."             --hidden-import psutil             --hidden-import requests             --hidden-import packaging             --hidden-import PyQt5
 
       - name: Build (macOS .pkg)
         if: runner.os == 'macOS'
@@ -174,7 +174,7 @@ jobs:
             --osx-entitlements-file "$PWD/build-macos-entitlements.plist"
           )
 
-          python -m PyInstaller --onedir --windowed tray_app.py             --name Breakeven_Tray             --add-data "icon.png:."             --hidden-import psutil             --hidden-import requests             --hidden-import packaging             --hidden-import PyQt5             "${PYINSTALLER_MAC_ARGS[@]}"
+          python -m PyInstaller --onedir --windowed tray_app.py             --name Breakeven_Tray             --icon icon.icns             --add-data "icon.png:."             --hidden-import psutil             --hidden-import requests             --hidden-import packaging             --hidden-import PyQt5             "${PYINSTALLER_MAC_ARGS[@]}"
 
           echo "== Verifying Breakeven_Tray.app signature =="
           codesign --verify --deep --strict --verbose=2 "dist/Breakeven_Tray.app"
