@@ -202,7 +202,19 @@ jobs:
 
           xcrun notarytool submit "dist/Breakeven_Tray.pkg"             --apple-id "$APPLE_ID"             --password "$APPLE_APP_SPECIFIC_PASSWORD"             --team-id "$APPLE_TEAM_ID"             --wait
 
-          xcrun stapler staple "dist/Breakeven_Tray.pkg"
+          staple_ok=false
+          for attempt in 1 2 3 4 5; do
+            if xcrun stapler staple "dist/Breakeven_Tray.pkg"; then
+              staple_ok=true
+              break
+            fi
+            echo "::warning::stapler staple attempt $attempt failed (possible transient Apple CloudKit network error). Retrying in 20s..."
+            sleep 20
+          done
+          if [ "$staple_ok" != "true" ]; then
+            echo "::error::stapler staple failed after 5 attempts."
+            exit 1
+          fi
 
           echo "== Validating stapled notarization ticket =="
           validate_ok=false
