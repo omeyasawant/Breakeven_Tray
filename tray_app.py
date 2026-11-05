@@ -2342,6 +2342,80 @@ class TrayApp(QtWidgets.QSystemTrayIcon):
         QApplication.quit()
 
 
+TRAY_ICON_SIZES = (16, 20, 24, 32, 40, 48, 64, 96, 128, 256)
+TRAY_ICONS_DIR = first_existing_path([
+    os.path.join(BUNDLE_DIR, "tray_icons"),
+    os.path.join(SCRIPT_DIR, "tray_icons"),
+    os.path.join(RUNTIME_DIR, "tray_icons"),
+])
+
+
+def taskbar_uses_light_theme() -> bool:
+    if platform.system().lower() != "windows":
+        return False
+    try:
+        import winreg
+        with winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER,
+            r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize",
+        ) as key:
+            return bool(winreg.QueryValueEx(key, "SystemUsesLightTheme")[0])
+    except Exception:
+        return False
+
+
+def enable_high_dpi_support():
+    for attr_name in ("AA_EnableHighDpiScaling", "AA_UseHighDpiPixmaps"):
+        attr = getattr(QtCore.Qt, attr_name, None)
+        if attr is not None:
+            QApplication.setAttribute(attr, True)
+    policy_enum = getattr(QtCore.Qt, "HighDpiScaleFactorRoundingPolicy", None)
+    if policy_enum is not None and hasattr(QtGui.QGuiApplication, "setHighDpiScaleFactorRoundingPolicy"):
+        QtGui.QGuiApplication.setHighDpiScaleFactorRoundingPolicy(policy_enum.PassThrough)
+
+
+def build_tray_icon(icon_path: str) -> "QtGui.QIcon":
+    if TRAY_ICONS_DIR:
+        variant = "light" if taskbar_uses_light_theme() else "dark"
+        icon = QtGui.QIcon()
+        for size in TRAY_ICON_SIZES:
+            frame_path = os.path.join(TRAY_ICONS_DIR, f"{variant}_{size}.png")
+            if os.path.isfile(frame_path):
+                icon.addFile(frame_path, QtCore.QSize(size, size))
+        if not icon.isNull():
+            log_info(f"[QT] Using pre-rendered {variant} tray icon frames from {TRAY_ICONS_DIR}")
+            return icon
+
+    # Fallback: pre-render every tray size with area-averaged smoothing so
+    # Windows never has to stretch or roughly downsample the 1254px source.
+    source = QtGui.QImage(icon_path)
+    if source.isNull():
+        log_error(f"[QT] Tray icon image could not be loaded from {icon_path}")
+        return QtGui.QIcon(icon_path)
+
+    source = source.convertToFormat(QtGui.QImage.Format_ARGB32_Premultiplied)
+
+    icon = QtGui.QIcon()
+    for size in TRAY_ICON_SIZES:
+        scaled = source
+        while scaled.width() > size * 2:
+            scaled = scaled.scaled(
+                max(size * 2, scaled.width() // 2),
+                max(size * 2, scaled.height() // 2),
+                QtCore.Qt.KeepAspectRatio,
+                QtCore.Qt.SmoothTransformation,
+            )
+        scaled = scaled.scaled(size, size, QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation)
+        canvas = QtGui.QImage(size, size, QtGui.QImage.Format_ARGB32_Premultiplied)
+        canvas.fill(QtCore.Qt.transparent)
+        painter = QtGui.QPainter(canvas)
+        painter.setRenderHint(QtGui.QPainter.SmoothPixmapTransform, True)
+        painter.drawImage((size - scaled.width()) // 2, (size - scaled.height()) // 2, scaled)
+        painter.end()
+        icon.addPixmap(QtGui.QPixmap.fromImage(canvas))
+    return icon
+
+
 def main():
     probe_mode = "--qt-probe" in sys.argv
     qt_args = [arg for arg in sys.argv if arg != "--qt-probe"]
@@ -2353,6 +2427,7 @@ def main():
                 sys.exit(run_headless_service_loop("No graphical Linux session detected; skipping Qt tray UI"))
 
         log_info("[QT] Creating QApplication")
+        enable_high_dpi_support()
         app = QApplication(qt_args)
         log_info("[QT] QApplication created")
         if probe_mode:
@@ -2364,7 +2439,7 @@ def main():
         if not QSystemTrayIcon.isSystemTrayAvailable():
             sys.exit(run_headless_service_loop("System tray is unavailable in this Linux session; skipping Qt tray UI"))
         log_info("[QT] System tray is available")
-        icon = QtGui.QIcon(ICON_PATH)
+        icon = build_tray_icon(ICON_PATH)
         log_info("[QT] Creating tray icon")
         tray_icon = TrayApp(icon)
         log_info("[QT] Showing tray icon")
